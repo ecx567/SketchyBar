@@ -37,6 +37,13 @@ void CGImageRelease(CGImageRef image) {
   CFRelease((void*)image);
 }
 
+// CGContextRelease mirrors CGImageRelease: a skbar_context IS the CGContextRef
+// (its destructor releases the backing SkSurface). Called by window_close /
+// surface_resize on Windows.
+void CGContextRelease(CGContextRef context) {
+  CFRelease((void*)context);
+}
+
 void CGPathRelease(CGPathRef path) {
   CFRelease((void*)path);
 }

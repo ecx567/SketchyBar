@@ -589,6 +589,33 @@ static skbar_image* make_image(sk_sp<SkImage> image, sk_sp<SkData> source) {
   return img;
 }
 
+// Snapshots the current canvas as an image (layer contents source). The canvas
+// matrix keeps CG user-space semantics, so the image matches what
+// CGBitmapContextCreateImage would return on macOS.
+skbar_image* sk_context_snapshot(skbar_context* context) {
+  if (!context || !context->surface) return nullptr;
+  sk_sp<SkImage> snapshot = context->surface->makeImageSnapshot();
+  if (!snapshot) return nullptr;
+  return make_image(std::move(snapshot), nullptr);
+}
+
+// Wraps a top-down premultiplied BGRA buffer (window_capture's output layout).
+skbar_image* sk_image_from_bgra(const void* bgra_topdown, uint32_t width, uint32_t height) {
+  if (!bgra_topdown || width == 0 || height == 0) return nullptr;
+
+  SkBitmap bitmap;
+  bitmap.setInfo(SkImageInfo::MakeN32Premul(static_cast<int>(width),
+                                            static_cast<int>(height)));
+  if (!bitmap.tryAllocPixels()) return nullptr;
+  std::memcpy(bitmap.getPixels(), bgra_topdown,
+              static_cast<size_t>(width) * 4u * static_cast<size_t>(height));
+
+  SkPixmap pixmap;
+  if (!bitmap.peekPixels(&pixmap)) return nullptr;
+  sk_sp<SkImage> image = SkImages::RasterFromPixmapCopy(pixmap);
+  return make_image(std::move(image), nullptr);
+}
+
 skbar_image* sk_image_decode_file(const char* path) {
   FILE* f = nullptr;
   if (fopen_s(&f, path, "rb") != 0 || !f) return nullptr;

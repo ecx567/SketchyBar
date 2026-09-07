@@ -230,6 +230,9 @@ void CGContextSetBlendMode(CGContextRef context, CGBlendMode mode);
 void CGContextSetAllowsFontSmoothing(CGContextRef context, bool allows);
 void CGContextSetInterpolationQuality(CGContextRef context, CGInterpolationQuality quality);
 void CGContextDrawImage(CGContextRef context, CGRect rect, CGImageRef image);
+// Releases a skbar_context (a CGContextRef IS a skbar_context on Windows).
+// window.c / surface.c call this on window close / surface resize.
+void CGContextRelease(CGContextRef context);
 
 CGMutablePathRef CGPathCreateMutable(void);
 void CGPathAddRect(CGMutablePathRef path, const void* transform, CGRect rect);
@@ -266,6 +269,10 @@ void CFRelease(void* obj);
 
 static inline bool CGSizeEqualToSize(CGSize a, CGSize b) {
   return a.width == b.width && a.height == b.height;
+}
+
+static inline bool CGPointEqualToPoint(CGPoint a, CGPoint b) {
+  return a.x == b.x && a.y == b.y;
 }
 
 #ifdef __cplusplus
