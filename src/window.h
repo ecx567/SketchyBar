@@ -1,6 +1,12 @@
 #pragma once
 #include "surface.h"
 
+#ifdef _WIN32
+// The Windows compositor (window.c _WIN32 branch) backs each window with a
+// layered HWND. The handle is the portable `id`'s display counterpart.
+#include <windows.h>
+#endif
+
 #define kCGSExposeFadeTagBit         (1ULL <<  1)
 #define kCGSPreventsActivationTagBit (1ULL <<  16)
 
@@ -17,6 +23,9 @@ struct window {
   bool needs_resize;
 
   uint32_t id;
+#ifdef _WIN32
+  HWND hwnd;
+#endif
   int32_t refc;
 
   CGRect frame;

@@ -127,6 +127,8 @@ set(WIN32_LIBS
     dcomp
     d2d1
     dxgi
+    d3d11
+    dxguid
     Winmm
     Setupapi)
 
@@ -153,7 +155,15 @@ function(skia_icu_data TARGET)
 endfunction()
 
 # --- sketchybar target --------------------------------------------------------
-add_executable(sketchybar ${PLATFORM_SOURCES} ${PORTABLE_CORE})
+# dcomp.h declares overloaded STDMETHODs (e.g. IDCompositionScaleTransform::
+# SetScaleX(float) + SetScaleX(IDCompositionAnimation*)) which are C++-only;
+# compile the DirectComposition layer as CXX (the seam is extern "C").
+set_source_files_properties(platform/layer_dcomp.c PROPERTIES LANGUAGE CXX)
+
+# The exe links the platform shims AND the graphics backend: layer_dcomp.c
+# (S3) references the seam (sk_image_read_pixels), so the stub/skia backend
+# must be part of the binary from S3 on.
+add_executable(sketchybar ${PLATFORM_SOURCES} ${SKBAR_BACKEND_SOURCES} ${PORTABLE_CORE})
 target_include_directories(sketchybar PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/platform)
@@ -216,3 +226,52 @@ endif()
 
 enable_testing()
 add_test(NAME bitmap_diff COMMAND bitmap_diff --check --case all)
+
+# --- compositor seam check (S3) --------------------------------------------------
+# Compiles the window/surface/layer compositing trio against the seam on
+# Windows. STATIC library: undefined refs to macOS-only modules (g_bar_manager,
+# g_disable_capture, g_nirvana) are tolerated until their Windows adapters land
+# (S4-S7), mirroring graphics_seam_check. Build it with:
+#   cmake --build . --target compositor_seam_check
+set(COMPOSITOR_SEAM_SOURCES
+    src/window.c
+    src/surface.c
+    src/context.c
+    src/font.c
+    src/image.c
+    src/color.c
+    platform/layer_dcomp.c)
+
+add_library(compositor_seam_check STATIC ${COMPOSITOR_SEAM_SOURCES}
+                                         ${SKBAR_BACKEND_SOURCES})
+target_include_directories(compositor_seam_check PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform)
+target_compile_definitions(compositor_seam_check PRIVATE _WIN32)
+if(SKIA_INCLUDE_DIR)
+  target_include_directories(compositor_seam_check PRIVATE ${SKIA_INCLUDE_DIR})
+  target_link_directories(compositor_seam_check PRIVATE ${SKIA_LIBRARY_DIR})
+endif()
+
+# --- compositor spike (S3) ---------------------------------------------------------
+# Validates the layered-window + acrylic-blur + DComp path (tasks 3.1/3.2/3.3)
+# on a real desktop session; in CI (headless) it reports skips and still exits
+# 0. Registered with ctest so it runs via:
+#   ctest --test-dir build -R compositor_spike
+add_executable(compositor_spike tests/spike_compositor.c
+                                 platform/layer_dcomp.c
+                                 ${SKBAR_BACKEND_SOURCES})
+target_include_directories(compositor_spike PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_definitions(compositor_spike PRIVATE _WIN32)
+target_link_libraries(compositor_spike PRIVATE ${WIN32_LIBS})
+if(SKIA_INCLUDE_DIR)
+  target_include_directories(compositor_spike PRIVATE ${SKIA_INCLUDE_DIR})
+  target_link_directories(compositor_spike PRIVATE ${SKIA_LIBRARY_DIR})
+  target_link_libraries(compositor_spike PRIVATE ${SKIA_HOST_LIBS})
+  skia_icu_data(compositor_spike)
+endif()
+
+add_test(NAME compositor_spike COMMAND compositor_spike)
