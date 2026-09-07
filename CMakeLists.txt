@@ -8,20 +8,27 @@ cmake_minimum_required(VERSION 3.20)
 #
 # Requires:
 #   - CMake >= 3.20
-#   - clang-cl (or MSVC) with C99 support, targeting x64
-#   - Optional: a Skia SDK (S1 links nothing against Skia yet; the find module
-#     establishes where S2 will locate the Skia libraries).
+#   - clang-cl (or MSVC) with C99 support + a C++17 compiler, targeting x64
+#   - Optional: a Skia SDK (S2 uses it for the real graphics backend). Point
+#     SKIA_DIR at an unpacked Windows Skia SDK to opt in; without it the
+#     fail-closed stub backend + parity gate are built instead.
 #
-# Primary target: `sketchybar`
-# Compile-check target: `platform_compile_check` (builds the platform shims).
+# Primary target: `sketchybar` (S3+; S1/S2 keep it compile-only)
+# Compile-check target: `platform_compile_check` (builds the platform shims)
+# Graphics seam (S2): `graphics_seam_check` (portable drawing core against the
+# Skia seam) and `bitmap_diff` (visual parity harness, registered with ctest).
 
 project(sketchybar-windows
         VERSION 2.24.0
-        LANGUAGES C)
+        LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Single x64 target (ARM64 later).
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -39,9 +46,10 @@ endif()
 add_compile_options(-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00)
 
 # --- Skia SDK discovery ------------------------------------------------------
-# S1 does not yet consume Skia (the graphics seam lands in S2). This find block
-# establishes where the Skia libraries are located so S2 can link them.
-# Point SKIA_DIR at an unpacked Skia SDK to opt in.
+# S2 consumes Skia only when a SDK is configured. Point SKIA_DIR at an unpacked
+# Windows Skia SDK to opt in. Without one, the fail-closed stub backend is
+# compiled (see platform/sk_backend_stub.c); the parity gate then cannot pass
+# by design (documented in openspec/changes/windows-port/apply-progress.md).
 set(SKIA_DIR "" CACHE PATH "Path to the Skia SDK for the Windows graphics backend")
 set(SKIA_INCLUDE_DIR "" CACHE PATH "Path to the Skia include directory")
 find_path(SKIA_INCLUDE_DIR skia/core/SkCanvas.h
@@ -49,7 +57,18 @@ find_path(SKIA_INCLUDE_DIR skia/core/SkCanvas.h
 if(SKIA_INCLUDE_DIR)
   message(STATUS "Skia SDK found at: ${SKIA_INCLUDE_DIR}")
 else()
-  message(STATUS "Skia SDK not found; graphics seam deferred to S2 (SKIA_DIR unset).")
+  message(STATUS "Skia SDK not found; graphics parity gate FAIL-CLOSED (stub backend).")
+endif()
+
+# --- Graphics backend selection ----------------------------------------------
+# Backend sources are the raw seam implementations (Skia C++ or stub C)
+# plus the backend-agnostic glue (CFRelease / CGImage* / CFData* dispatch).
+set(SKBAR_BACKEND_SOURCES
+    platform/sk_backend_common.c)
+if(SKIA_INCLUDE_DIR)
+  list(APPEND SKBAR_BACKEND_SOURCES platform/sk_backend_skia.cpp)
+else()
+  list(APPEND SKBAR_BACKEND_SOURCES platform/sk_backend_stub.c)
 endif()
 
 # --- Platform shims ----------------------------------------------------------
@@ -103,4 +122,28 @@ target_compile_definitions(sketchybar PRIVATE _WIN32)
 target_link_libraries(sketchybar PRIVATE ${WIN32_LIBS})
 if(SKIA_INCLUDE_DIR AND SKIA_DIR)
   target_link_directories(sketchybar PRIVATE ${SKIA_DIR}/out)
+endif()
+
+# --- graphics seam check (S2) --------------------------------------------------
+# Compiles the portable drawing core (context, font, image, color) against the
+# Skia seam on Windows. A STATIC library keeps undefined refs to macOS-only
+# modules (bar_manager symbols, media events, ...) from blocking the compile
+# seam until their Windows adapters land (S3-S7). Build it with:
+#   cmake --build . --target graphics_seam_check
+set(GRAPHICS_SEAM_SOURCES
+    src/context.c
+    src/font.c
+    src/image.c
+    src/color.c)
+
+add_library(graphics_seam_check STATIC ${GRAPHICS_SEAM_SOURCES} ${SKBAR_BACKEND_SOURCES})
+target_include_directories(graphics_seam_check PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform)
+if(SKIA_INCLUDE_DIR)
+  target_include_directories(graphics_seam_check PRIVATE ${SKIA_INCLUDE_DIR})
+endif()
+target_compile_definitions(graphics_seam_check PRIVATE _WIN32)
+if(SKIA_INCLUDE_DIR AND SKIA_DIR)
+  target_link_directories(graphics_seam_check PRIVATE ${SKIA_DIR}/out)
 endif()
