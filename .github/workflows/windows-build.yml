@@ -3,9 +3,14 @@ name: windows-build
 # Compile-check gate for the native Windows port of SketchyBar.
 #
 # This workflow validates that the platform shims + win_compat layer compile
-# under clang-cl on Windows (target: platform_compile_check from CMakeLists.txt).
-# It is the CI seam established in slice S1; later slices (S2+) will extend it
-# to build the full `sketchybar` target and run the visual-parity harness.
+# under clang-cl on Windows (target: platform_compile_check), and that the
+# S2 graphics seam compiles with the fail-closed stub backend
+# (target: graphics_seam_check + bitmap_diff).
+#
+# The visual-parity gate (bitmap_diff via ctest) is intentionally NOT run in
+# CI: without a Skia SDK the stub backend makes the harness exit non-zero by
+# design (fail-closed). The gate runs on a machine that configures SKIA_DIR;
+# see openspec/changes/windows-port/apply-progress.md.
 #
 # Note: the macOS Makefile build is intentionally NOT part of this workflow.
 # macOS CI would require a macOS runner and the Apple frameworks; the existing
@@ -50,6 +55,11 @@ jobs:
         run: |
           cmake --build build --target platform_compile_check
 
+      - name: Build graphics seam check (S2, stub backend)
+        run: |
+          cmake --build build --target graphics_seam_check
+          cmake --build build --target bitmap_diff
+
       - name: Report success
         run: |
-          Write-Output "platform_compile_check succeeded for config: ${{ matrix.config }}"
+          Write-Output "platform_compile_check + graphics_seam_check succeeded for config: ${{ matrix.config }}"
