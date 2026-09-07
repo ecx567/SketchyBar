@@ -1,5 +1,7 @@
 #pragma once
+#ifndef _WIN32
 #include <CoreVideo/CoreVideo.h>
+#endif
 #include "misc/helpers.h"
 
 extern struct bar_manager g_bar_manager;

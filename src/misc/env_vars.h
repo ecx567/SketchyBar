@@ -1,4 +1,7 @@
 #pragma once
+#ifdef _WIN32
+#include <assert.h>
+#endif
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>

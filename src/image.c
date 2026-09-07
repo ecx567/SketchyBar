@@ -1,8 +1,14 @@
 #include "image.h"
 #include "misc/helpers.h"
 #include "shadow.h"
+#ifndef _WIN32
 #include "workspace.h"
+#endif
 #include "media.h"
+#ifdef _WIN32
+#include "bar_manager.h"
+#include "../platform/sk_backend.h"
+#endif
 
 void image_init(struct image* image) {
   image->enabled = false;
@@ -47,6 +53,20 @@ bool image_load(struct image* image, char* path, FILE* rsp) {
 
   struct key_value_pair app_kv = get_key_value_pair(app, '.');
   if (app_kv.key && app_kv.value && strcmp(app_kv.key, "app") == 0) {
+#ifdef _WIN32
+    // workspace_get_scale() arrives with the Windows workspace adapter (S7);
+    // until then the icon is treated as 1x, mirroring the macOS scale*scale.
+    float app_scale = 1.f;
+    CGImageRef app_icon = (CGImageRef)sk_icon_for_app(app_kv.value);
+    scale = app_scale * app_scale;
+    if (app_icon) new_image_ref = app_icon;
+    else {
+      respond(rsp, "[!] Image: Invalid application name: '%s'\n", app_kv.value);
+      free(res_path);
+      free(app);
+      return false;
+    }
+#else
     CGImageRef app_icon = workspace_icon_for_app(app_kv.value);
     scale = workspace_get_scale();
     scale *= scale;
@@ -57,7 +77,16 @@ bool image_load(struct image* image, char* path, FILE* rsp) {
       free(app);
       return false;
     }
+#endif
   } else if (app_kv.key && app_kv.value && strcmp(app_kv.key, "space") == 0) {
+#ifdef _WIN32
+    // Space capture is macOS-only (WindowServer SLS APIs); explicit fail until
+    // a Windows equivalent exists (out of S2 scope).
+    respond(rsp, "[!] Image: Space capture is not supported on Windows yet\n");
+    free(res_path);
+    free(app);
+    return false;
+#else
     uint32_t sid = atoi(app_kv.value);
     CGImageRef space_img = space_capture(sid);
     if (space_img) new_image_ref = space_img;
@@ -67,12 +96,18 @@ bool image_load(struct image* image, char* path, FILE* rsp) {
       free(app);
       return false;
     }
+#endif
   } else if (strcmp(path, "media.artwork") == 0) {
     free(res_path);
     free(app);
     begin_receiving_media_events();
     return image_set_link(image, &g_bar_manager.current_artwork);
   } else if (file_exists(res_path)) {
+#ifdef _WIN32
+    // SkCodec decodes PNG/JPEG (and more) from the file; NULL on failure is
+    // handled by the caller below identically to the macOS providers.
+    new_image_ref = (CGImageRef)sk_image_decode_file(res_path);
+#else
     CGDataProviderRef data_provider = CGDataProviderCreateWithFilename(res_path);
     if (data_provider) {
       if (strlen(res_path) > 3 && string_equals(&res_path[strlen(res_path) - 4], ".png"))
@@ -93,6 +128,7 @@ bool image_load(struct image* image, char* path, FILE* rsp) {
       free(app);
       return false;
     }
+#endif
   }
   else if (strlen(res_path) == 0) {
     image_destroy(image);

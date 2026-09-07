@@ -1,5 +1,7 @@
 #pragma once
+#ifndef _WIN32
 #include <CoreText/CoreText.h>
+#endif
 #include "background.h"
 #include "font.h"
 
