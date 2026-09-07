@@ -173,3 +173,85 @@ Full transcript: `build/s2f/s2f-evidence.txt` (sha256 `B3B5555F35CDDC86464358B76
 - `platform/sk_backend_skia.cpp` — drift fixes (all commented `m124 drift:`).
 - `platform/win_graphics_types.h` — `kCGPathStroke` added.
 - `CMakeLists.txt` — SDK discovery, `/MT`, NOMINMAX, ICU data copy, shim source.
+
+## S3: Compositing spike + layered window (PR 3)
+
+Executed on `feat/windows-port-s3` (parent `7411436` = S2 tip). Commits:
+
+- `8df30dc` feat(S3): add snapshot and BGRA image wrap to graphics seam
+- `f0b1edb` feat(S3): integrate DirectComposition layer and compositor spike
+- `209c3e8` feat(S3): add Windows compositor paths to window.c
+- `bfdaf96` feat(S3): add Windows surface paths for DirectComposition upload
+
+### Design decisions
+
+- **Two display paths in S3**: `surface_flush` uploads the canvas snapshot to the
+  DirectComposition layer (the compositor path); `window_flush` ALSO displays the
+  same pixels via `UpdateLayeredWindow` (the production layered-window path). The
+  DComp visual tree is NOT attached to an HWND target in S3 — attaching the root
+  visual (`IDCompositionTarget::SetRoot`) is the S7 hardware-composition follow-up.
+  Both paths are exercised by the spike.
+- **Seam pixel order proven**: `sk_context_read_pixels` exports CG user-space order
+  (row 0 == BOTTOM). A positive-height DIB is also bottom-up, so the ULW upload is
+  a byte-for-byte memcpy (no flip) — proven by the spike's asymmetric bands
+  (blue bottom / white middle / red top on an 80x20 pt canvas) with CPU-side row
+  checks on the raw buffer.
+- **dcomp.h requires C++**: the Windows SDK's `dcomp.h` declares overloaded
+  `STDMETHOD`s (`IDCompositionScaleTransform::SetScaleX(float)` +
+  `SetScaleX(IDCompositionAnimation*)`) which are legal only in C++. `layer_dcomp.c`
+  is therefore compiled as CXX (`set_source_files_properties LANGUAGE CXX`); the
+  seam's `extern "C"` guards keep link compatibility, and `layer.h` gained the
+  matching `extern "C"` block.
+- **Monotonic window id**: `window->id` is a monotonic counter on Windows (not a
+  truncated HWND); the real handle lives in the new `window->hwnd` member
+  (`src/window.h`, `_WIN32`-only).
+- **`SetWindowCompositionAttribute` real signature**: `WINDOWCOMPOSITIONATTRIBDATA`
+  wrapper (Attribute/Data/SizeOfData) AROUND the accent policy; passing the policy
+  flat sets Attribute == AccentState and fails.
+- **Corrected earlier spike draft**: the leftover `tests/spike_compositor.c` had two
+  real bugs — a top-down DIB comment that would render the bar vertically flipped,
+  and a 3-argument `CHECK(fn(hwnd,&data),...)` macro misuse that never compiled.
+  The committed spike is a rewrite.
+
+### Honest gaps (documented, by design)
+
+- **blur radius approximation (task 3.6)**: Windows exposes NO per-window blur
+  radius API. The radius value is carried in the acrylic policy's `AccentFlags`
+  slot (best effort). Visual quality of the approximation requires an
+  interactive-desktop check (spike ran PASSED on the dev desktop; radius tuning is
+  an S7 polish item).
+- **Click-through parity (task 3.1)**: spike validates layered/tool/no-activate
+  styles, topmost, and non-activation. `WS_EX_TRANSPARENT` (mouse pass-through)
+  is deliberately deferred to the S5 mouse adapter, which owns hit-testing.
+- **Capture DIB alpha (task 3.7)**: the DIB alpha channel from BitBlt is treated
+  as opaque (alpha-forced) when wrapping into the seam image — the SLS capture
+  path returned the rendered surface premultiplied; desktop composition does not
+  carry window alpha into a screen DC capture.
+- **No desktop in CI**: `compositor_spike` self-detects (CreateWindowExW == NULL →
+  SKIP desktop checks, exit 0); `--strict` demands a desktop (exit 1 otherwise,
+  used for the interactive validation run). Documented in the spike header.
+
+### Build evidence (clang-cl 23.1.0, Win SDK 10.0.26100.0, Skia m124)
+
+1. `cmake -S . -B build/s3 -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+   -DCMAKE_BUILD_TYPE=Release -DSKIA_DIR=third_party/skia` → configure OK, Skia SDK found (20 libs).
+2. `cmake --build build/s3` → `sketchybar.exe`, `compositor_seam_check.lib`, `compositor_spike.exe` build clean.
+3. `compositor_spike.exe` → **16/16 PASS, exit 0** (interactive desktop present):
+   ex-style constants, class registration, user32 proc resolution, seam dims +
+   CG-order layout, layered/tool/no-activate styles, ULW upload, topmost,
+   non-activation, acrylic enable + disable, `sk_image_from_bgra` wrap, DComp
+   layer round-trip.
+4. `ctest --test-dir build/s3 -R compositor_spike` → **Passed** (0.20 s).
+5. `sketchybar.exe` smoke → **rc=0** (S1 entry-point contract preserved).
+6. `bitmap_diff --render --case all` → **PASS, exit 0** (S2 regression preserved).
+7. `git diff --stat makefile` → **empty** (macOS build untouched).
+
+### Outcome
+
+- S3 implemented, verified locally, committed in 4 work units (+ this doc).
+- **Budget overage**: ~1,152 changed lines vs the 800-line budget (782 tracked
+  insertions + ~370 spike). Per protocol the settle was NOT requested; the split
+  proposal follows below.
+- Suggested next step: reviewer/owner decision between accepting the overage or
+  splitting S3a (3.1–3.3: spike + layer_dcomp + seam) from S3b (3.4–3.7:
+  window.c/surface.c) — both halves are independently buildable commits already.
