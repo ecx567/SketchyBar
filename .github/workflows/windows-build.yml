@@ -1,0 +1,55 @@
+name: windows-build
+
+# Compile-check gate for the native Windows port of SketchyBar.
+#
+# This workflow validates that the platform shims + win_compat layer compile
+# under clang-cl on Windows (target: platform_compile_check from CMakeLists.txt).
+# It is the CI seam established in slice S1; later slices (S2+) will extend it
+# to build the full `sketchybar` target and run the visual-parity harness.
+#
+# Note: the macOS Makefile build is intentionally NOT part of this workflow.
+# macOS CI would require a macOS runner and the Apple frameworks; the existing
+# macOS build path stays unchanged and is verified on the upstream project.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  compile-check:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # S1 builds a single x64 target. clang-cl from the MSVC toolchain is
+        # used (already present on windows-latest) to mirror the Makefile's
+        # -std=c99 -Wall -O3 flags with /std:c11 /W4 /O2.
+        include:
+          - config: Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC environment (clang-cl + Ninja)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure CMake (clang-cl + Ninja)
+        run: |
+          cmake -S . -B build `
+            -G Ninja `
+            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+
+      - name: Build platform compile check
+        run: |
+          cmake --build build --target platform_compile_check
+
+      - name: Report success
+        run: |
+          Write-Output "platform_compile_check succeeded for config: ${{ matrix.config }}"

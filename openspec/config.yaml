@@ -1,0 +1,43 @@
+project: sketchybar
+description: >
+  macOS-native status bar tool (fork of FelixKratz/SketchyBar) written in C99
+  and Objective-C. Current goal: add native Windows support while preserving
+  the exact same visual design and configuration model.
+context: |
+  - C99 + Objective-C, Makefile build, universal binary (x86 + arm64)
+  - Deeply coupled to Apple frameworks: Carbon, AppKit, QuartzCore, SkyLight,
+    DisplayServices, MediaRemote, CoreAudio, CoreWLAN, CoreVideo, IOKit
+  - Plugin system via shell scripts (plugins/)
+  - Runtime configuration via sketchybarrc shell script
+  - No existing test suite, no CI/CD pipelines
+  - Architecture: modular src/ with header/impl pairs; macOS-specific code in
+    .m files (Objective-C), cross-platform logic in .c files
+
+strict_tdd: false
+
+testing:
+  projects:
+    - path: .
+      stack: "C99 + Objective-C / Makefile"
+      test_command: "—"
+      framework: "—"
+      test_layers:
+        unit: { available: false, tool: "—" }
+        integration: { available: false, tool: "—" }
+        e2e: { available: false, tool: "—" }
+      coverage:
+        available: false
+        command: "—"
+      quality_tools:
+        linter: { available: false, command: "—" }
+        type_checker: { available: false, command: "—" }
+        formatter: { available: false, command: "—" }
+
+phases:
+  proposal: "sdd-propose"
+  spec: "sdd-spec"
+  design: "sdd-design"
+  tasks: "sdd-tasks"
+  apply: "sdd-apply"
+  verify: "sdd-verify"
+  archive: "sdd-archive"

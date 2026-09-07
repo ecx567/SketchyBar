@@ -1,13 +1,27 @@
 #pragma once
+#ifndef _WIN32
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
+#include "extern.h"
+#else
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#include "../../platform/win_compat.h"
+#endif
 #include "env_vars.h"
 #include "defines.h"
-#include "extern.h"
 
 #define array_count(a) (sizeof((a)) / sizeof(*(a)))
 #define max(a, b) (a > b ? a : b)
@@ -389,12 +403,18 @@ static inline char *string_copy(char *s) {
 }
 
 static inline char* read_file(char* path) {
+#ifdef _WIN32
+  char* content = win_read_file(path);
+  free(path);
+  return content;
+#else
   int fd = open(path, O_RDONLY);
   int len = lseek(fd, 0, SEEK_END);
   char* file = mmap(0, len, PROT_READ, MAP_PRIVATE, fd, 0);
   close(fd);
   free(path);
   return string_copy(file);
+#endif
 }
 
 static inline char* resolve_path(char* path) {
@@ -411,6 +431,10 @@ static inline char* resolve_path(char* path) {
 }
 
 static inline bool file_exists(char *filename) {
+#ifdef _WIN32
+  return GetFileAttributesA(filename) != INVALID_FILE_ATTRIBUTES
+      && (GetFileAttributesA(filename) & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
   struct stat buffer;
 
   if (stat(filename, &buffer) != 0) {
@@ -422,9 +446,14 @@ static inline bool file_exists(char *filename) {
   }
 
   return true;
+#endif
 }
 
 static inline bool ensure_executable_permission(char *filename) {
+#ifdef _WIN32
+  // NTFS has no executable bit; the permission model does not apply.
+  return win_ensure_executable_permission(filename);
+#else
   struct stat buffer;
 
   if (stat(filename, &buffer) != 0) {
@@ -436,9 +465,16 @@ static inline bool ensure_executable_permission(char *filename) {
     return false;
   }
   return true;
+#endif
 }
 
 static inline bool sync_exec(char *command, struct env_vars *env_vars) {
+#ifdef _WIN32
+  // Windows: no fork/exec. Env vars are applied by the caller (S5) through
+  // SetEnvironmentVariable; here we just spawn the command.
+  (void)env_vars;
+  return win_fork_exec(command);
+#else
   if (env_vars) {
     for (int i = 0; i < env_vars->count; i++) {
       setenv(env_vars->vars[i]->key, env_vars->vars[i]->value, 1);
@@ -447,17 +483,23 @@ static inline bool sync_exec(char *command, struct env_vars *env_vars) {
 
   char *exec[] = { "/usr/bin/env", "sh", "-c", command, NULL};
   return execvp(exec[0], exec);
+#endif
 }
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static inline bool fork_exec(char *command, struct env_vars* env_vars) {
+#ifdef _WIN32
+  // Windows: single-process spawn via CreateProcess; no vfork child.
+  return win_fork_exec(command);
+#else
   int pid = vfork();
   if (pid == -1) return false;
   if (pid !=  0) return true;
 
   alarm(FORK_TIMEOUT);
   exit(sync_exec(command, env_vars));
+#endif
 }
 #pragma clang diagnostic pop
 
