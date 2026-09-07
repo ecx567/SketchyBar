@@ -151,6 +151,10 @@ typedef enum {
   kCGPathEvenOddFill = 1,
   kCGPathFillStroke = 2,
   kCGPathEvenOddFillStroke = 3,
+  /* Stroke-only was missing from the original alias set (the portable core
+   * only ever passes fill/fill-stroke modes). Added by S2f so the Skia
+   * backend's defensive switch covers the full CoreGraphics mode set. */
+  kCGPathStroke = 4,
 } CGPathDrawingMode;
 
 typedef enum {

@@ -100,3 +100,76 @@ Evidence sha256: `865DA7EE2DE0F373158CCFB53D15B930E8887D29992F566ED37B0C012E8774
 - Untracked (deliberately NOT committed): `.atl/`, `openspec/changes/windows-port/proposal.md`, `openspec/changes/windows-port/specs/` — flag for the archive slice.
 - Line budget: ~1.4k LOC across the slice vs the 400-line budget → report honestly,
   recommend `size:exception`.
+
+---
+
+# S2f — Skia SDK verification (bound sha256 `865DA7EE2DE0F373158CCFB53D15B930E8887D29992F566ED37B0C012E877481`)
+
+Status: **VERIFIED — real Skia backend compiles, links, and passes the renderability gate**
+
+## SDK
+
+- Aseprite/skia `m124-08a5439a6b` Windows x64 Release (private-master build):
+  `https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip`
+- Zip SHA-256: `5A371A4B2819BB4EB96E36CD75FA623585E1D5477E253A970302B6F2471B6934`
+- Vendored at `third_party/skia/` (130 MB, 1972 files; gitignored except README.md manifest).
+- 20 static libs in `out/Release-x64/`; built with `extra_cflags=["-MT"]` → targets must
+  link with `/MT` (`CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded"` when Skia is found).
+
+## Verified m124 API drift (previously never compile-checked)
+
+| Backend code (pre-m124 API) | m124 reality | Fix |
+|---|---|---|
+| `#include "include/core/SkEncodedImageFormat.h"` | file does not exist | removed |
+| `SkTypeface::MakeFromName(...)` | removed from m124 | `SkFontMgr_New_DirectWrite()` + `matchFamilyStyle` (`include/ports/SkTypeface_win.h`) |
+| `SkFontMgr::RefDefault()` | does not exist | n/a (DirectWrite factory path) |
+| `snapshot->encodeToData(SkEncodedImageFormat::kPNG, 100)` | removed | `SkPngEncoder::Encode(&stream, pm, SkPngEncoder::Options{})` (`include/encode/SkPngEncoder.h`) — note m124 has **no default Options arg** |
+| `shaper->shape(...)` returning `bool` | returns `void` in m124 | success proven via `makeBlob()`; drop `if (!shaped)` |
+| feature-taking `shape` (font+features form) | does not exist | full run-iterator form (`TrivialFontRunIterator/BiDi/Script/Language`) |
+| `struct DrawState` | collides with Win32 `DrawStateA` macro (winuser.h) | renamed `SKBarDrawState` |
+| `sk_sp<SkPath>` | SkPath is a value type | `SkPath` + `has_current_path` bool |
+| `drawImageRect(..., constraint?)` 5-arg | 5-arg overload removed | pass `SkCanvas::SrcRectConstraint::kFast_SrcRectConstraint` |
+| `drawTextBlob(blob, x, y)` 3-arg | removed | pass explicit paint |
+| `SkFontStyle(int,int,int)` | 3rd arg is `Slant` enum | type slant as `SkFontStyle::Slant` |
+| `kCGPathEOFill`/`kCGPathEOFillStroke` | not in `win_graphics_types.h` | header names them `kCGPathEvenOddFill(Stroke)` |
+| `kCGPathStroke` | missing from the enum entirely | added `kCGPathStroke = 4` (additive, documented) |
+| `SHCreateItemFromParsingName(const char*)` | takes `PCWSTR` only | UTF-8→UTF-16 via `MultiByteToWideChar` |
+| `BHID_SFUIObject` | defined in `um/ShlGuid.h`, not shobjidl_core.h | `#include <shlguid.h>` |
+| freetype2.lib wants plain `inflate` | SDK zlib is Chromium-prefixed (`Cr_z_*`) | `platform/skia_zlib_shim.c` forwards the 4 needed names to `Cr_z_*` |
+
+`SkTextBlobBuilderRunHandler` verified at `modules/skshaper/include/SkShaper.h:278` — the
+existing `SkShaper.h` include is sufficient (no drift).
+
+## Build evidence (clang-cl 23.1.0, MSVC 14.44.35207, Win SDK 10.0.26100.0)
+
+1. `cmake --build build/s2f --target bitmap_diff` → clean compile + link:
+   - `bitmap_diff.exe` (5.6 MB) — Skia backend + skshaper + harfbuzz + freetype + zlib shim.
+2. `bitmap_diff.exe --render --case all` → **exit 0, PASS**:
+   - `determinism OK for 'arial'`, `'times'`, `'courier'` (245760 bytes each, two renders identical)
+   - golden PNGs are the macOS-side artifact; Windows `--render` is determinism-only by harness design.
+3. `bitmap_diff.exe --check --case all` → **exit 3** `golden file missing: arial_macos.png`
+   (expected: goldens require a macOS render run; gate is fail-closed without them).
+4. `ctest --test-dir build/s2f -R bitmap_diff` → fails with the same exit-3 golden-gap (recorded, not a regression).
+5. `cmake --build build/s2f` (all targets) → `graphics_seam_check.lib`, `sketchybar.exe` (111 KB),
+   `platform_compile_check.lib` all build with the real backend.
+6. `sketchybar.exe` smoke run → starts, exits rc=0 cleanly (no crash).
+7. ICU data: SDK ships `third_party/externals/icu/flutter/icudtl.dat`; post-build copy next to
+   each Skia-backed exe (SkIcuLoader resolves it relative to the executable).
+
+Full transcript: `build/s2f/s2f-evidence.txt` (sha256 `B3B5555F35CDDC86464358B76624157AD469AEAE5230A2FFD3D3BC83E886FD1D`)
+
+## Bound remediation
+
+- Every unverified API assumption recorded in the S2 evidence (`build/s2-check/build-evidence.txt`)
+  is now compile/link/run-verified against the vendored m124 SDK (table above).
+- Remaining honest gap: cross-platform **pixel parity** needs `*_macos.png` goldens from a
+  macOS run (no macOS hardware in S2f). Renderability + determinism are proven on Windows.
+- `size:exception` stands (drift fixes + shim are additive, documented).
+
+## S2f artifacts
+
+- `third_party/skia/README.md` — SDK provenance manifest (committed; SDK itself gitignored).
+- `platform/skia_zlib_shim.c` — zlib name forwarding (committed).
+- `platform/sk_backend_skia.cpp` — drift fixes (all commented `m124 drift:`).
+- `platform/win_graphics_types.h` — `kCGPathStroke` added.
+- `CMakeLists.txt` — SDK discovery, `/MT`, NOMINMAX, ICU data copy, shim source.
