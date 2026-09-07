@@ -21,6 +21,14 @@ int skbar_win_main(int argc, char **argv) {
   return 0;
 }
 
+// S1 temporary entry point: lets the `sketchybar` executable target link before
+// src/sketchybar.c (its _WIN32 main, task 1.5) joins PORTABLE_CORE, which becomes
+// possible once the core headers compile on Windows (S2/S4). REMOVE THIS when
+// src/sketchybar.c is added to PORTABLE_CORE (task 7.5) to avoid a duplicate main.
+int main(int argc, char **argv) {
+  return skbar_win_main(argc, argv);
+}
+
 void skbar_message_pump(void) {
   // S5: GetMessage/DispatchMessage loop over the hidden HWND.
 }
