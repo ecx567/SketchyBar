@@ -118,6 +118,11 @@ CGRect sk_line_get_bounds(skbar_line* line, CTLineBoundsOptions options) {
 
 skbar_image* sk_image_decode_file(const char* path) { (void)path; return NULL; }
 skbar_image* sk_icon_for_app(const char* app)        { (void)app; return NULL; }
+skbar_image* sk_context_snapshot(skbar_context* context) { (void)context; return NULL; }
+skbar_image* sk_image_from_bgra(const void* bgra_topdown, uint32_t width, uint32_t height) {
+  (void)bgra_topdown; (void)width; (void)height;
+  return NULL;
+}
 skbar_image* sk_image_retain(skbar_image* image)     { return image; }
 void sk_image_unref(skbar_image* image)              { (void)image; }
 uint32_t sk_image_width(skbar_image* image)          { (void)image; return 0; }

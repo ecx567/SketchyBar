@@ -84,6 +84,12 @@ bool sk_context_read_pixels(skbar_context* context, size_t* out_width, size_t* o
 // Encodes the canvas as PNG (golden files). Returns false on failure.
 bool sk_context_write_png(skbar_context* context, const char* path);
 
+// Snapshots the current canvas as an image; the Windows compositor uploads
+// these pixels as layer contents (surface_flush, layer_set_contents). The
+// image is refcounted: caller owns the ref (sk_image_unref). Returns NULL on
+// failure.
+skbar_image* sk_context_snapshot(skbar_context* context);
+
 // --- paths --------------------------------------------------------------------
 skbar_path* sk_path_create(void);
 void sk_path_add_rect(skbar_path* path, CGRect rect);
@@ -129,6 +135,12 @@ uint32_t sk_image_height(skbar_image* image);
 // sk_context_read_pixels). Returns false when the image cannot be rasterized.
 // Caller frees *out_bgra with free().
 bool sk_image_read_pixels(skbar_image* image, size_t* out_width, size_t* out_height, void** out_bgra);
+
+// Wraps a raw TOP-DOWN premultiplied BGRA buffer (row 0 == top) into an image.
+// The buffer is copied; the caller keeps ownership. This is Skia's native
+// raster layout, and exactly what window_capture (BitBlt into a bottom-up DIB,
+// then flipped) hands over on Windows. Returns NULL on failure.
+skbar_image* sk_image_from_bgra(const void* bgra_topdown, uint32_t width, uint32_t height);
 
 // Borrows the ORIGINAL ENCODED SOURCE BYTES as a data blob (equivalent to
 // CGImageGetDataProvider: image.c copies it via CGDataProviderCopyData and
