@@ -147,3 +147,28 @@ target_compile_definitions(graphics_seam_check PRIVATE _WIN32)
 if(SKIA_INCLUDE_DIR AND SKIA_DIR)
   target_link_directories(graphics_seam_check PRIVATE ${SKIA_DIR}/out)
 endif()
+
+# --- visual parity gate (S2) ---------------------------------------------------
+# bitmap_diff renders the reference cases through the seam and compares against
+# the other-platform golden (<case>_<platform>.png). With the stub backend it
+# exits non-zero with a documented message (the gate is fail-closed without a
+# real Skia SDK). Registered with ctest so it runs via:
+#   ctest --test-dir build -R bitmap_diff
+#
+# The harness calls the sk_* surface directly (it must not reference the
+# portable core's bar_manager globals), so it links ONLY the backend.
+add_executable(bitmap_diff tests/bitmap_diff_main.c ${SKBAR_BACKEND_SOURCES})
+target_include_directories(bitmap_diff PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+if(SKIA_INCLUDE_DIR)
+  target_include_directories(bitmap_diff PRIVATE ${SKIA_INCLUDE_DIR})
+endif()
+target_compile_definitions(bitmap_diff PRIVATE _WIN32)
+if(SKIA_INCLUDE_DIR AND SKIA_DIR)
+  target_link_directories(bitmap_diff PRIVATE ${SKIA_DIR}/out)
+endif()
+
+enable_testing()
+add_test(NAME bitmap_diff COMMAND bitmap_diff --check --case all)
