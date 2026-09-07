@@ -1,5 +1,7 @@
 #pragma once
+#ifndef _WIN32
 #include <CoreGraphics/CoreGraphics.h>
+#endif
 #include "context.h"
 
 struct window;

@@ -1,6 +1,9 @@
 #include "font.h"
 #include "animation.h"
 #include "bar_manager.h"
+#ifdef _WIN32
+#include "../platform/sk_backend.h"
+#endif
 
 struct feature_mapping {
   char opentype_tag[5];
@@ -57,6 +60,13 @@ void get_truetype_feature(const char* opentype_tag, int* truetype_feature, int* 
 }
 
 void font_register(char* font_path) {
+#ifdef _WIN32
+  // External font registration is a documented no-op on Windows until the
+  // Skia font-collection path lands (S7); system fonts resolve via the
+  // DirectWrite-backed SkFontMgr.
+  sk_font_register(font_path);
+  free(font_path);
+#else
   CFStringRef url_string = CFStringCreateWithCString(kCFAllocatorDefault,
                                                      font_path,
                                                      kCFStringEncodingUTF8);
@@ -73,8 +83,70 @@ void font_register(char* font_path) {
     CFRelease(url_string);
   }
   free(font_path);
+#endif
 }
 
+#ifdef _WIN32
+// Resolves a numeric "feature:selector" pair to its OpenType tag using the
+// shared table above. First match wins; the table's (35,2) collision between
+// "salt"/"ss01" therefore resolves to "salt", which is exactly what the macOS
+// descriptor path applies for the numeric pair.
+static bool get_opentype_tag(int feature, int selector, char tag[5]) {
+  for (int i = 0; feature_mappings[i].opentype_tag[0] != '\0'; ++i) {
+    if (feature_mappings[i].truetype_feature == feature
+        && feature_mappings[i].truetype_selector == selector) {
+      memcpy(tag, feature_mappings[i].opentype_tag, 5);
+      return true;
+    }
+  }
+  return false;
+}
+
+void font_create_ctfont(struct font* font) {
+  // Windows shaping is OpenType-tag driven (SkShaper::Feature), so the
+  // features string is normalized here: 4-char tags pass through, numeric
+  // "N:M" pairs are reverse-mapped to their tag. The Skia backend receives
+  // only explicit 4-char tags.
+  char tags[64][5];
+  size_t tag_count = 0;
+
+  if (font->features) {
+    char* features_copy = string_copy(font->features);
+    char* feature = strtok(features_copy, ",");
+
+    while (feature && tag_count < 64) {
+      int feature_name = 0;
+      int feature_selector = 0;
+
+      if (sscanf(feature, "%d:%d", &feature_name, &feature_selector) == 2) {
+        char tag[5];
+        if (get_opentype_tag(feature_name, feature_selector, tag)) {
+          memcpy(tags[tag_count], tag, 5);
+          ++tag_count;
+        }
+      } else if (strlen(feature) == 4) {
+        get_truetype_feature(feature, &feature_name, &feature_selector);
+        if (feature_name != 0) {
+          memcpy(tags[tag_count], feature, 4);
+          tags[tag_count][4] = '\0';
+          ++tag_count;
+        }
+      }
+
+      feature = strtok(NULL, ",");
+    }
+
+    free(features_copy);
+  }
+
+  if (font->ct_font) CFRelease(font->ct_font);
+  font->ct_font = (skbar_font*)sk_font_create(font->family,
+                                              font->style,
+                                              font->size,
+                                              tags,
+                                              tag_count);
+}
+#else
 void font_create_ctfont(struct font* font) {
 
   CFStringRef family_ref = CFStringCreateWithCString(NULL,
@@ -151,6 +223,7 @@ void font_create_ctfont(struct font* font) {
   CFRelease(style_ref);
   CFRelease(family_ref);
 }
+#endif
 
 void font_init(struct font* font) {
   font->size = 14.f;

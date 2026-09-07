@@ -1,5 +1,7 @@
 #pragma once
+#ifndef _WIN32
 #include <CoreText/CoreText.h>
+#endif
 #include "misc/helpers.h"
 
 struct font {

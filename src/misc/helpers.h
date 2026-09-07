@@ -15,9 +15,11 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <math.h>
+#include <time.h>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#include "../../platform/win_graphics_types.h"
 #include "../../platform/win_compat.h"
 #endif
 #include "env_vars.h"
@@ -172,9 +174,11 @@ static inline void pack_key_value_pair(char* cursor, struct key_value_pair* key_
   *cursor++ = '\0';
 }
 
+#ifndef _WIN32
 static inline bool is_root(void) {
   return getuid() == 0 || geteuid() == 0;
 }
+#endif
 
 static inline bool string_equals(const char *a, const char *b) {
   return a && b && strcmp(a, b) == 0;
@@ -363,6 +367,7 @@ static inline char *string_escape_quote(char *s) {
   return result;
 }
 
+#ifndef _WIN32
 static inline CFArrayRef cfarray_of_cfnumbers(void *values, size_t size, int count, CFNumberType type) {
   CFNumberRef temp[count];
 
@@ -391,6 +396,7 @@ static inline char *cfstring_copy(CFStringRef string) {
 
   return result;
 }
+#endif /* _WIN32 */
 
 static inline char *string_copy(char *s) {
   int length = strlen(s);
@@ -503,6 +509,7 @@ static inline bool fork_exec(char *command, struct env_vars* env_vars) {
 }
 #pragma clang diagnostic pop
 
+#ifndef _WIN32
 static inline int mission_control_index(uint64_t sid) {
   uint64_t result = 0;
   int desktop_cnt = 1;
@@ -587,6 +594,7 @@ static inline uint32_t display_id_for_space(uint32_t sid) {
 
   return id;
 }
+#endif /* _WIN32 */
 
 static inline void error(const char *format, ...) {
     va_list args;
@@ -596,6 +604,8 @@ static inline void error(const char *format, ...) {
     exit(EXIT_FAILURE);
 }
 
+#ifndef _WIN32
 static inline int get_wid_from_cg_event(CGEventRef event) {
   return CGEventGetIntegerValueField(event, 0x33);
 }
+#endif
