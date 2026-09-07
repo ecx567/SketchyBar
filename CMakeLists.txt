@@ -44,6 +44,11 @@ else()
 endif()
 
 add_compile_options(-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00)
+# Windows headers define macro min/max which collide with std::min/std::max
+# and <limits> std::numeric_limits<T>::max/min inside the Skia headers. Skia
+# headers are not self-contained against those macros, so NOMINMAX must be a
+# global define.
+add_compile_definitions(NOMINMAX)
 
 # --- Skia SDK discovery ------------------------------------------------------
 # S2 consumes Skia only when a SDK is configured. Point SKIA_DIR at an unpacked
@@ -51,11 +56,33 @@ add_compile_options(-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00)
 # compiled (see platform/sk_backend_stub.c); the parity gate then cannot pass
 # by design (documented in openspec/changes/windows-port/apply-progress.md).
 set(SKIA_DIR "" CACHE PATH "Path to the Skia SDK for the Windows graphics backend")
-set(SKIA_INCLUDE_DIR "" CACHE PATH "Path to the Skia include directory")
-find_path(SKIA_INCLUDE_DIR skia/core/SkCanvas.h
-          HINTS ${SKIA_DIR}/include)
+# S2f: the vendored SDK (Aseprite m124, third_party/skia) uses the canonical
+# Google root layout — headers at <SDK>/include/core/... So SKIA_INCLUDE_DIR
+# resolves to the SDK ROOT and the backend's `#include "include/core/..."` and
+# `#include "modules/skshaper/include/..."` includes resolve unchanged.
+find_path(SKIA_INCLUDE_DIR include/core/SkCanvas.h
+          HINTS ${SKIA_DIR})
 if(SKIA_INCLUDE_DIR)
   message(STATUS "Skia SDK found at: ${SKIA_INCLUDE_DIR}")
+  # Static libraries ship under out/Release-x64 in the vendored SDK.
+  set(SKIA_LIBRARY_DIR "${SKIA_DIR}/out/Release-x64" CACHE PATH
+      "Directory holding the vendored static Skia libraries")
+  if(NOT EXISTS "${SKIA_LIBRARY_DIR}")
+    set(SKIA_LIBRARY_DIR "${SKIA_DIR}/out")
+  endif()
+  # The Aseprite SDK is built with -MT (static Microsoft CRT — see
+  # out/Release-x64/args.gn: extra_cflags=["-MT"]). Every target that links it
+  # must use the same runtime library or the linker rejects the mismatch
+  # (LNK2038 RuntimeLibrary).
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  # Link every static lib in the SDK's lib dir; lld-link pulls only the
+  # referenced members, so the superset is safe and future-proof.
+  file(GLOB SKIA_STATIC_LIBS "${SKIA_LIBRARY_DIR}/*.lib")
+  list(LENGTH SKIA_STATIC_LIBS SKIA_STATIC_LIB_COUNT)
+  message(STATUS "Skia static libraries: ${SKIA_LIBRARY_DIR} (${SKIA_STATIC_LIB_COUNT} libs)")
+  # DirectWrite (SkFontMgr_New_DirectWrite) + the Win32 APIs the backend uses
+  # (shell32/ole32/gdi32) must be linked into anything that links skia.lib.
+  set(SKIA_HOST_LIBS ${SKIA_STATIC_LIBS} dwrite shell32 ole32 gdi32)
 else()
   message(STATUS "Skia SDK not found; graphics parity gate FAIL-CLOSED (stub backend).")
 endif()
@@ -67,6 +94,9 @@ set(SKBAR_BACKEND_SOURCES
     platform/sk_backend_common.c)
 if(SKIA_INCLUDE_DIR)
   list(APPEND SKBAR_BACKEND_SOURCES platform/sk_backend_skia.cpp)
+  # freetype2.lib (via skshaper -> HarfBuzz) references plain zlib names;
+  # the SDK ships Chromium-prefixed zlib only. See platform/skia_zlib_shim.c.
+  list(APPEND SKBAR_BACKEND_SOURCES platform/skia_zlib_shim.c)
 else()
   list(APPEND SKBAR_BACKEND_SOURCES platform/sk_backend_stub.c)
 endif()
@@ -110,6 +140,18 @@ target_include_directories(platform_compile_check PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/platform)
 target_compile_definitions(platform_compile_check PRIVATE _WIN32)
 
+# Shipping ICU data next to Skia-backed binaries. SkIcuLoader resolves
+# icudtl.dat relative to the executable dir; without it Skia runs with a null
+# ICU fallback (fine for Latin shaping, degraded for complex scripts).
+set(SKIA_ICU_DATA "${SKIA_DIR}/third_party/externals/icu/flutter/icudtl.dat")
+function(skia_icu_data TARGET)
+  if(EXISTS "${SKIA_ICU_DATA}")
+    add_custom_command(TARGET ${TARGET} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${SKIA_ICU_DATA}" "$<TARGET_FILE_DIR:${TARGET}>/icudtl.dat")
+  endif()
+endfunction()
+
 # --- sketchybar target --------------------------------------------------------
 add_executable(sketchybar ${PLATFORM_SOURCES} ${PORTABLE_CORE})
 target_include_directories(sketchybar PRIVATE
@@ -120,8 +162,10 @@ if(SKIA_INCLUDE_DIR)
 endif()
 target_compile_definitions(sketchybar PRIVATE _WIN32)
 target_link_libraries(sketchybar PRIVATE ${WIN32_LIBS})
-if(SKIA_INCLUDE_DIR AND SKIA_DIR)
-  target_link_directories(sketchybar PRIVATE ${SKIA_DIR}/out)
+if(SKIA_INCLUDE_DIR)
+  target_link_libraries(sketchybar PRIVATE ${SKIA_HOST_LIBS})
+  target_link_directories(sketchybar PRIVATE ${SKIA_LIBRARY_DIR})
+  skia_icu_data(sketchybar)
 endif()
 
 # --- graphics seam check (S2) --------------------------------------------------
@@ -144,8 +188,8 @@ if(SKIA_INCLUDE_DIR)
   target_include_directories(graphics_seam_check PRIVATE ${SKIA_INCLUDE_DIR})
 endif()
 target_compile_definitions(graphics_seam_check PRIVATE _WIN32)
-if(SKIA_INCLUDE_DIR AND SKIA_DIR)
-  target_link_directories(graphics_seam_check PRIVATE ${SKIA_DIR}/out)
+if(SKIA_INCLUDE_DIR)
+  target_link_directories(graphics_seam_check PRIVATE ${SKIA_LIBRARY_DIR})
 endif()
 
 # --- visual parity gate (S2) ---------------------------------------------------
@@ -162,12 +206,12 @@ target_include_directories(bitmap_diff PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/platform
     ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_definitions(bitmap_diff PRIVATE _WIN32)
 if(SKIA_INCLUDE_DIR)
   target_include_directories(bitmap_diff PRIVATE ${SKIA_INCLUDE_DIR})
-endif()
-target_compile_definitions(bitmap_diff PRIVATE _WIN32)
-if(SKIA_INCLUDE_DIR AND SKIA_DIR)
-  target_link_directories(bitmap_diff PRIVATE ${SKIA_DIR}/out)
+  target_link_directories(bitmap_diff PRIVATE ${SKIA_LIBRARY_DIR})
+  target_link_libraries(bitmap_diff PRIVATE ${SKIA_HOST_LIBS})
+  skia_icu_data(bitmap_diff)
 endif()
 
 enable_testing()

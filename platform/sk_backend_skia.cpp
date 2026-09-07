@@ -3,7 +3,7 @@
 // The real Skia implementation of the sk_* graphics seam (see sk_backend.h).
 //
 // BUILD GATE: this file is only compiled when CMake finds a Skia SDK
-// (SKIA_INCLUDE_DIR resolves skia/core/SkCanvas.h). CI without a SDK builds
+// (SKIA_INCLUDE_DIR resolves include/core/SkCanvas.h). CI without a SDK builds
 // sk_backend_stub.c instead, so this translation unit is compile-gated —
 // it is verified on a machine that configures SKIA_DIR, not in this repo's
 // stub CI. API surface pinned to the long-lived Skia core+shaper headers
@@ -36,7 +36,7 @@
 #include "include/core/SkBitmap.h"
 #include "include/core/SkBlendMode.h"
 #include "include/core/SkCanvas.h"
-#include "include/core/SkEncodedImageFormat.h"
+#include "include/core/SkData.h"
 #include "include/core/SkFont.h"
 #include "include/core/SkFontMetrics.h"
 #include "include/core/SkFontMgr.h"
@@ -51,9 +51,13 @@
 #include "include/core/SkTextBlob.h"
 #include "include/core/SkTypeface.h"
 #include "include/core/SkTypes.h"
+#include "include/core/SkStream.h"
+#include "include/encode/SkPngEncoder.h"
+#include "include/ports/SkTypeface_win.h"
 #include "modules/skshaper/include/SkShaper.h"
 
 #include <shobjidl_core.h>
+#include <shlguid.h>  // BHID_SFUIObject (thumbnail/icon shell binder)
 
 namespace {
 
@@ -61,13 +65,16 @@ constexpr uint32_t kMagic = 0x5A5A5A5Au;
 
 // A CGContext-replaceable draw state. sk_context_save/restore stack these the
 // same way CG does (full graphics state), in addition to SkCanvas save/restore.
-struct DrawState {
+struct SKBarDrawState {
   SkPaint paint;
   SkPoint text_position = SkPoint::Make(0.f, 0.f);
   CGBlendMode blend_mode = kCGBlendModeNormal;
   bool font_smoothing = true;
   bool interpolation_none = false;
-  sk_sp<SkPath> current_path;  // null == no current path
+  // SkPath is a value type (not ref-counted), so no sk_sp<SkPath>. has_*
+  // tracks the "no current path" state that sk_context_add_path(0) clears.
+  SkPath current_path;
+  bool has_current_path = false;
 };
 
 SkBlendMode to_sk_blend(CGBlendMode mode) {
@@ -112,7 +119,7 @@ SkFontStyle to_sk_style(const char* style) {
   bool bold   = style && (std::strstr(style, "Bold") || std::strstr(style, "Demibold") || std::strstr(style, "Semi"));
   bool italic = style && (std::strstr(style, "Italic") || std::strstr(style, "Oblique"));
   int weight  = bold ? SkFontStyle::kBold_Weight : SkFontStyle::kNormal_Weight;
-  int slant   = italic ? SkFontStyle::kItalic_Slant : SkFontStyle::kUpright_Slant;
+SkFontStyle::Slant slant = italic ? SkFontStyle::kItalic_Slant : SkFontStyle::kUpright_Slant;
   return SkFontStyle(weight, SkFontStyle::kNormal_Width, slant);
 }
 
@@ -139,7 +146,7 @@ struct skbar_context {
   SkCanvas* canvas = nullptr;
   uint32_t width = 0;
   uint32_t height = 0;
-  std::vector<DrawState> states;  // index 0 is the initial state
+  std::vector<SKBarDrawState> states;  // index 0 is the initial state
 };
 
 struct skbar_path {
@@ -210,7 +217,7 @@ skbar_context* sk_context_create(uint32_t pixel_width,
             0, 0, 1);
   ctx->canvas->concat(cg);
 
-  DrawState initial;
+  SKBarDrawState initial;
   initial.font_smoothing = font_smoothing;
   ctx->states.push_back(initial);
   return ctx;
@@ -230,7 +237,7 @@ void sk_context_restore(skbar_context* context) {
   context->canvas->restore();
 }
 
-static DrawState& draw_state(skbar_context* context) {
+static SKBarDrawState& draw_state(skbar_context* context) {
   return context->states.back();
 }
 
@@ -242,7 +249,7 @@ void sk_context_set_fill_rgba(skbar_context* context, CGFloat r, CGFloat g, CGFl
 }
 
 void sk_context_set_stroke_rgba(skbar_context* context, CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
-  DrawState& s = draw_state(context);
+  SKBarDrawState& s = draw_state(context);
   s.paint.setColor(SkColor4f{static_cast<float>(r),
                              static_cast<float>(g),
                              static_cast<float>(b),
@@ -255,7 +262,7 @@ void sk_context_set_line_width(skbar_context* context, CGFloat width) {
 }
 
 void sk_context_set_blend_mode(skbar_context* context, CGBlendMode mode) {
-  DrawState& s = draw_state(context);
+  SKBarDrawState& s = draw_state(context);
   s.blend_mode = mode;
   s.paint.setBlendMode(to_sk_blend(mode));
 }
@@ -276,20 +283,28 @@ void sk_context_set_text_position(skbar_context* context, CGFloat x, CGFloat y) 
 void sk_context_add_path(skbar_context* context, const skbar_path* path) {
   // CGContextAddPath appends; the seam stores the most recently added path,
   // which covers every call site in the portable core (documented deviation).
-  draw_state(context).current_path = path ? path->path : nullptr;
+  SKBarDrawState& s = draw_state(context);
+  if (path) {
+    s.current_path = path->path;
+    s.has_current_path = true;
+  } else {
+    s.has_current_path = false;
+  }
 }
 
 void sk_context_clip(skbar_context* context) {
-  const sk_sp<SkPath>& path = draw_state(context).current_path;
-  if (path) context->canvas->clipPath(*path, SkClipOp::kIntersect, true);
+  const SKBarDrawState& s = draw_state(context);
+  if (s.has_current_path) context->canvas->clipPath(s.current_path, SkClipOp::kIntersect, true);
 }
 
 void sk_context_draw_path(skbar_context* context, CGPathDrawingMode mode) {
-  DrawState& s = draw_state(context);
-  if (!s.current_path) return;
+  SKBarDrawState& s = draw_state(context);
+  if (!s.has_current_path) return;
 
-  SkPath path = *s.current_path;
-  if (mode == kCGPathEOFill || mode == kCGPathEOFillStroke) {
+  SkPath path = s.current_path;
+  // Windows header names the even-odd modes kCGPathEvenOddFill(Stroke) (the
+  // Apple spellings kCGPathEOFill/kCGPathEOFillStroke do not exist there).
+  if (mode == kCGPathEvenOddFill || mode == kCGPathEvenOddFillStroke) {
     path.setFillType(SkPathFillType::kEvenOdd);
   }
 
@@ -299,7 +314,7 @@ void sk_context_draw_path(skbar_context* context, CGPathDrawingMode mode) {
       context->canvas->drawPath(path, s.paint);
       break;
     case kCGPathFillStroke:
-    case kCGPathEOFillStroke:
+    case kCGPathEvenOddFillStroke:
       // CG composites fill-then-stroke with an implicit alpha blend between
       // the two passes; kStrokeAndFill is the documented single-pass
       // approximation (surfaced by the parity harness).
@@ -307,7 +322,7 @@ void sk_context_draw_path(skbar_context* context, CGPathDrawingMode mode) {
       context->canvas->drawPath(path, s.paint);
       break;
     case kCGPathFill:
-    case kCGPathEOFill:
+    case kCGPathEvenOddFill:
     default:
       s.paint.setStyle(SkPaint::kFill_Style);
       context->canvas->drawPath(path, s.paint);
@@ -327,13 +342,15 @@ void sk_context_draw_image(skbar_context* context, CGRect rect, const skbar_imag
   context->canvas->drawImageRect(image->image,
                                  SkRect::MakeWH(static_cast<SkScalar>(image->width),
                                                 static_cast<SkScalar>(image->height)),
-                                 dst, sampling, &draw_state(context).paint);
+                                 dst, sampling, &draw_state(context).paint,
+                                 SkCanvas::SrcRectConstraint::kFast_SrcRectConstraint);
 }
 
 void sk_context_draw_line(skbar_context* context, const skbar_line* line) {
   if (!line || !line->blob) return;
-  DrawState& s = draw_state(context);
-  context->canvas->drawTextBlob(line->blob, s.text_position.x(), s.text_position.y());
+  SKBarDrawState& s = draw_state(context);
+  // m124: drawTextBlob requires the explicit paint argument.
+  context->canvas->drawTextBlob(line->blob, s.text_position.x(), s.text_position.y(), s.paint);
 }
 
 bool sk_context_read_pixels(skbar_context* context, size_t* out_width, size_t* out_height, void** out_bgra) {
@@ -361,7 +378,14 @@ bool sk_context_write_png(skbar_context* context, const char* path) {
   if (!context->surface) return false;
   sk_sp<SkImage> snapshot = context->surface->makeImageSnapshot();
   if (!snapshot) return false;
-  sk_sp<SkData> png = snapshot->encodeToData(SkEncodedImageFormat::kPNG, 100);
+
+  // m124 drift: SkImage::encodeToData was removed from the vendored SDK;
+  // encode through the standalone PNG encoder instead.
+  SkPixmap pm;
+  if (!snapshot->peekPixels(&pm)) return false;
+  SkDynamicMemoryWStream stream;
+  if (!SkPngEncoder::Encode(&stream, pm, SkPngEncoder::Options{})) return false;
+  sk_sp<SkData> png = stream.detachAsData();
   if (!png) return false;
 
   FILE* f = nullptr;
@@ -407,7 +431,12 @@ skbar_font* sk_font_create(const char* family,
                            float size,
                            const char feature_tags[][5],
                            size_t feature_count) {
-  sk_sp<SkTypeface> typeface = SkTypeface::MakeFromName(family, to_sk_style(style));
+  // m124 drift: SkTypeface::MakeFromName and SkFontMgr::RefDefault no longer
+  // exist in the vendored SDK; the DirectWrite font manager is the supported
+  // system-font source on Windows (include/ports/SkTypeface_win.h).
+  sk_sp<SkFontMgr> font_mgr = SkFontMgr_New_DirectWrite();
+  if (!font_mgr) return nullptr;
+  sk_sp<SkTypeface> typeface = font_mgr->matchFamilyStyle(family, to_sk_style(style));
   if (!typeface) return nullptr;
 
   auto* font = new skbar_font();
@@ -473,11 +502,23 @@ skbar_line* sk_line_create(skbar_font* font, const char* text, size_t length) {
 
   SkTextBlobBuilderRunHandler builder(text, SkPoint::Make(0.f, 0.f));
   const SkScalar no_wrap = 1e6f;
-  bool shaped = font->features.empty()
-      ? shaper->shape(text, length, skfont, true, no_wrap, &builder)
-      : shaper->shape(text, length, skfont, true, no_wrap,
-                      font->features.data(), font->features.size(), &builder);
-  if (!shaped) return nullptr;
+  if (font->features.empty()) {
+    // m124 still ships the simple font+width form.
+    shaper->shape(text, length, skfont, true, no_wrap, &builder);
+  } else {
+    // m124 drift: the feature-taking overload requires the full run-iterator
+    // set (the simple font+features form arrived in a later Skia). Trivial
+    // iterators pin the same single-run, LTR, Latin baseline the simple form
+    // would use, so parity semantics are unchanged.
+    SkShaper::TrivialFontRunIterator font_it(skfont, length);
+    SkShaper::TrivialBiDiRunIterator bidi_it(0, length);  // 0 == LTR
+    SkShaper::TrivialScriptRunIterator script_it(SkSetFourByteTag('L', 'a', 't', 'n'), length);
+    SkShaper::TrivialLanguageRunIterator lang_it("en", length);
+    // m124: shape() returns void; success is proven by makeBlob() below.
+    shaper->shape(text, length, font_it, bidi_it, script_it, lang_it,
+                  font->features.data(), font->features.size(),
+                  no_wrap, &builder);
+  }
 
   auto* line = new skbar_line();
   line->base.magic = kMagic;
@@ -576,9 +617,18 @@ skbar_image* sk_icon_for_app(const char* app) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   skbar_image* result = nullptr;
 
+  // SHCreateItemFromParsingName takes a wide string; the seam receives UTF-8.
+  wchar_t wide_path[1024] = { 0 };
+  const int wlen = MultiByteToWideChar(CP_UTF8, 0, app, -1,
+                                       wide_path, (int)(sizeof(wide_path) / sizeof(wide_path[0])));
+  if (wlen == 0) {
+    CoUninitialize();
+    return nullptr;
+  }
+
   IShellItem* item = nullptr;
   HRESULT hr = SHCreateItemFromParsingName(
-      app, nullptr, IID_PPV_ARGS(&item));
+      wide_path, nullptr, IID_PPV_ARGS(&item));
   if (SUCCEEDED(hr) && item) {
     IShellItemImageFactory* factory = nullptr;
     hr = item->BindToHandler(nullptr, BHID_SFUIObject,

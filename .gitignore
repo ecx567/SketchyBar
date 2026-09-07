@@ -14,3 +14,9 @@ compile_commands.json
 
 # Windows port build trees (CMake + Ninja output)
 build*/
+
+# Vendored Skia SDK (S2f): 130 MB of prebuilt binaries are NOT committed.
+# Provenance lives in third_party/skia/README.md (tracked); the SDK itself is
+# re-downloaded from the pinned checksummed source.
+third_party/skia/*
+!third_party/skia/README.md
