@@ -1,3 +1,4 @@
+#ifndef _WIN32
 #include "bar_manager.h"
 #include "event.h"
 #include "workspace.h"
@@ -11,6 +12,20 @@
 #include "hotload.h"
 #include <libgen.h>
 #include <dlfcn.h>
+#else
+#include "misc/help.h"
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+#ifndef MAXLEN
+#define MAXLEN 512
+#endif
+#include "platform/win_platform.h"
+#include "platform/win_compat.h"
+#endif
 
 #define LCFILE_PATH_FMT  "/tmp/%s_%s.lock"
 
@@ -30,6 +45,7 @@
 #define MINOR 24
 #define PATCH 0
 
+#ifndef _WIN32
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
 extern CGError SLSWindowManagementBridgeSetDelegate(void* delegate);
 #endif
@@ -40,13 +56,17 @@ extern int SLSMainConnectionID(void);
 extern int RunApplicationEventLoop(void);
 
 CGError (* SBSLSTransactionAddPostDecodeAction)(CFTypeRef, void (^)()) = NULL;
+#endif
 
 int g_connection;
+#ifndef _WIN32
 CFTypeRef g_transaction;
 int g_space_management_mode;
 
-struct bar_manager g_bar_manager;
 struct mach_server g_mach_server;
+
+struct bar_manager g_bar_manager;
+#endif
 void *g_workspace_context;
 
 char g_name[256];
@@ -55,8 +75,11 @@ char g_lock_file[MAXLEN];
 bool g_volume_events;
 bool g_brightness_events;
 int64_t g_disable_capture = 0;
+#ifndef _WIN32
 pid_t g_pid = 0;
+#endif
 
+#ifndef _WIN32
 static int client_send_message(int argc, char **argv) {
   if (argc <= 1) {
     return EXIT_SUCCESS;
@@ -106,8 +129,20 @@ static int client_send_message(int argc, char **argv) {
 
   return EXIT_SUCCESS;
 }
+#endif
 
 static void acquire_lockfile(void) {
+#ifdef _WIN32
+  // Single-instance guard via a named mutex (replaces the fcntl lock file on
+  // macOS). Loses the fcntl lockfile's pid; a second instance fails fast.
+  char mutex_name[280];
+  snprintf(mutex_name, sizeof(mutex_name), "Local\\git.felix.%s", g_name);
+  HANDLE mutex = CreateMutexA(NULL, TRUE, mutex_name);
+  if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+    fprintf(stderr, "%s: could not acquire single-instance mutex... already running?\n", g_name);
+    exit(EXIT_FAILURE);
+  }
+#else
   int handle = open(g_lock_file, O_CREAT | O_WRONLY, 0600);
   if (handle == -1) {
     error("%s: could not create lock-file! abort..\n", g_name);
@@ -124,8 +159,10 @@ static void acquire_lockfile(void) {
   if (fcntl(handle, F_SETLK, &lockfd) == -1) {
     error("%s: could not acquire lock-file... already running?\n", g_name);
   }
+#endif
 }
 
+#ifndef _WIN32
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static inline void init_misc_settings(void) {
@@ -198,7 +235,29 @@ static void system_events(uint32_t event, void* data, size_t data_length, void* 
     g_disable_capture = 0;
   }
 }
+#endif
 
+#ifdef _WIN32
+// Windows entry point. The daemon body (COM init, hidden window, message pump,
+// event adapters) lives in platform/win_main.c / platform/win_events.c and is
+// wired up in S5. The skeleton owns only the name, the BAR_NAME env var and
+// the single-instance mutex (task 1.5).
+static char* win_basename(char* path) {
+  char* name = path;
+  for (char* p = path; *p; ++p) {
+    if (*p == '\\' || *p == '/') name = p + 1;
+  }
+  return name;
+}
+
+int main(int argc, char **argv) {
+  snprintf(g_name, sizeof(g_name), "%s", win_basename(argv[0]));
+  win_setenv("BAR_NAME", g_name);
+
+  acquire_lockfile();
+  return skbar_win_main(argc, argv);
+}
+#else
 int main(int argc, char **argv) {
   snprintf(g_name, sizeof(g_name), "%s", basename(argv[0]));
 
@@ -255,3 +314,4 @@ int main(int argc, char **argv) {
   RunApplicationEventLoop();
   return 0;
 }
+#endif
