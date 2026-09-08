@@ -135,10 +135,15 @@ static void acquire_lockfile(void) {
 #ifdef _WIN32
   // Single-instance guard via a named mutex (replaces the fcntl lock file on
   // macOS). Loses the fcntl lockfile's pid; a second instance fails fast.
+  // GetLastError() is only meaningful immediately after the call, so clear it
+  // first and capture it before anything else can clobber it (task 4.4).
   char mutex_name[280];
   snprintf(mutex_name, sizeof(mutex_name), "Local\\git.felix.%s", g_name);
+  SetLastError(0);
   HANDLE mutex = CreateMutexA(NULL, TRUE, mutex_name);
-  if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+  DWORD mutex_error = GetLastError();
+  if (!mutex || mutex_error == ERROR_ALREADY_EXISTS) {
+    if (mutex) CloseHandle(mutex);
     fprintf(stderr, "%s: could not acquire single-instance mutex... already running?\n", g_name);
     exit(EXIT_FAILURE);
   }

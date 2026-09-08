@@ -60,6 +60,15 @@ jobs:
           cmake --build build --target graphics_seam_check
           cmake --build build --target bitmap_diff
 
+      - name: Build IPC seam check + tests (S4)
+        run: |
+          cmake --build build --target ipc_seam_check
+          cmake --build build --target ipc_pipe
+
+      - name: Run named-pipe IPC tests (S4)
+        run: |
+          ctest --test-dir build -R ipc_pipe --output-on-failure
+
       - name: Report success
         run: |
-          Write-Output "platform_compile_check + graphics_seam_check succeeded for config: ${{ matrix.config }}"
+          Write-Output "platform_compile_check + graphics_seam_check + ipc_pipe tests succeeded for config: ${{ matrix.config }}"
