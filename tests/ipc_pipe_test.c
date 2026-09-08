@@ -62,11 +62,13 @@ static void slow_handler(struct mach_buffer* message) {
                     response, (uint32_t)strlen(response) + 1, false);
 }
 
-static struct mach_server g_server;
-
-static bool start_server(mach_handler handler) {
+static bool start_server(struct mach_server* server, mach_handler handler) {
   unique_bar_name();
-  return mach_server_begin(&g_server, handler);
+  return mach_server_begin(server, handler);
+}
+
+static void stop_server(struct mach_server* server) {
+  mach_server_stop(server);
 }
 
 static void* wait_pipe(const char* name) {
@@ -121,27 +123,32 @@ static void test_frame_validation(void** state) {
 /* --- 2. round trip ------------------------------------------------------------ */
 static void test_round_trip(void** state) {
   (void)state;
-  assert_true(start_server(echo_handler));
+  struct mach_server server = { 0 };
+  assert_true(start_server(&server, echo_handler));
   char* rsp = send_frame("--set", "test");
   assert_non_null(rsp);
   assert_string_equal(rsp, "ok:--set");
   free(rsp);
+  stop_server(&server);
 }
 
 /* --- 3. timeout ---------------------------------------------------------------- */
 static void test_timeout(void** state) {
   (void)state;
-  assert_true(start_server(slow_handler));
+  struct mach_server server = { 0 };
+  assert_true(start_server(&server, slow_handler));
   char* rsp = send_frame("--get", "time");
   assert_non_null(rsp);
   assert_int_equal(strlen(rsp), 0);  /* empty response, no deadlock */
   free(rsp);
+  stop_server(&server);
 }
 
 /* --- 4. oversized frames ------------------------------------------------------- */
 static void test_oversized_rejected(void** state) {
   (void)state;
-  assert_true(start_server(echo_handler));
+  struct mach_server server = { 0 };
+  assert_true(start_server(&server, echo_handler));
 
   char name[IPC_PIPE_NAME_MAX];
   ipc_pipe_name(g_name, name, sizeof(name));
@@ -161,12 +168,14 @@ static void test_oversized_rejected(void** state) {
   assert_non_null(rsp);
   assert_string_equal(rsp, "ok:--get");
   free(rsp);
+  stop_server(&server);
 }
 
 /* --- 5. malformed NUL separators on the wire ----------------------------------- */
 static void test_malformed_wire_rejected(void** state) {
   (void)state;
-  assert_true(start_server(echo_handler));
+  struct mach_server server = { 0 };
+  assert_true(start_server(&server, echo_handler));
 
   char name[IPC_PIPE_NAME_MAX];
   ipc_pipe_name(g_name, name, sizeof(name));
@@ -182,6 +191,7 @@ static void test_malformed_wire_rejected(void** state) {
   assert_non_null(rsp);
   assert_string_equal(rsp, "ok:--get");
   free(rsp);
+  stop_server(&server);
 }
 
 /* --- 6. session guard ----------------------------------------------------------- */
@@ -220,7 +230,8 @@ static void test_session_guard(void** state) {
   free(sd);
 
   /* A live client of the test server is same-session by construction. */
-  assert_true(start_server(echo_handler));
+  struct mach_server server = { 0 };
+  assert_true(start_server(&server, echo_handler));
   char name[IPC_PIPE_NAME_MAX];
   ipc_pipe_name(g_name, name, sizeof(name));
   HANDLE h = wait_pipe(name);
@@ -232,6 +243,7 @@ static void test_session_guard(void** state) {
   assert_non_null(rsp);
   assert_string_equal(rsp, "ok:--get");
   free(rsp);
+  stop_server(&server);
 }
 
 int main(void) {
