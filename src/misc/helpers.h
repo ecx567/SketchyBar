@@ -608,4 +608,11 @@ static inline void error(const char *format, ...) {
 static inline int get_wid_from_cg_event(CGEventRef event) {
   return CGEventGetIntegerValueField(event, 0x33);
 }
+#else
+// Windows (S5): the CGEvent accessors are implemented by platform/win_events.c
+// (the Windows CGEvent mirrors the macOS field surface). Same 0x33 field as the
+// macOS path above.
+static inline int get_wid_from_cg_event(CGEventRef event) {
+  return (int)CGEventGetIntegerValueField(event, kCGEventWindowNumber);
+}
 #endif

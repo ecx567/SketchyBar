@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <math.h>
 #include <sys/types.h> /* pid_t for the portable headers (UCRT) */
+#include <windows.h>   /* HANDLE (mach_port_t below; S5 aligns with src/mach.h) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,9 +72,12 @@ typedef struct skbar_font* CTFontRef;
 typedef struct skbar_line* CTLineRef;
 
 // Mach-ism referenced by the portable core headers (bar_item.h event_port).
-// Mach ports are uint32 over the wire; a placeholder type is enough to keep
-// the core compiling until the real Windows event-port adapter lands.
-typedef uint32_t mach_port_t;
+// S1 used a uint32 placeholder; S4 (src/mach.h) defines the real type as a
+// pipe HANDLE. The two definitions MUST stay in lockstep: win_graphics_types.h
+// is reached BEFORE mach.h in the event.h include chain, so it carries the S4
+// type to avoid a conflicting redefinition in translation units that include
+// both (event.c, win_events.c, events_test.c).
+typedef HANDLE mach_port_t;
 
 // POSIX-ism referenced by the portable core headers (alias.h pid).
 // The UCRT <sys/types.h> (Win10 SDK 26100) does NOT provide pid_t; alias.h
@@ -99,6 +103,10 @@ typedef struct skbar_data* CGDataProviderRef;
 typedef struct CGEvent* CGEventRef;
 typedef struct CVDisplayLink* CVDisplayLinkRef;
 typedef long CFIndex;
+
+/* Display change flag type referenced by src/display.h's callback typedef.
+ * macOS: a CGDisplayChangeSummaryFlags bit mask (UInt32). */
+typedef uint32_t CGDisplayChangeSummaryFlags;
 
 // --- enums/constants (values mirror the macOS headers 1:1) -----------------
 typedef enum {
@@ -201,6 +209,7 @@ typedef enum {
 /* CGEvent/flag constants referenced by helpers.h inline helpers. Values mirror
  * the macOS CGEventTypes.h header exactly. */
 typedef enum {
+  kCGEventNull = 0,
   kCGEventLeftMouseDown = 1,
   kCGEventLeftMouseUp = 2,
   kCGEventRightMouseDown = 3,
@@ -213,6 +222,40 @@ typedef enum {
   kCGEventFlagMaskCommand = 1 << 20,
   kCGEventFlagMaskSecondaryFn = 1 << 22,
 } CGEventFlags;
+
+/* CGEvent integer fields referenced by src/event.c's mouse handlers. Values
+ * mirror CGEventTypes.h (kCGEventWindowNumber == 0x33 == 51, the same value
+ * src/misc/helpers.h's get_wid_from_cg_event hardcodes on macOS). */
+#define kCGEventWindowNumber 0x33
+#define kCGMouseEventButtonNumber 3
+#define kCGScrollWheelEventDeltaAxis1 11
+
+/* Windows CGEvent accessors (S5). On macOS these are CoreGraphics functions
+ * operating on a real CGEvent; on Windows the opaque `struct CGEvent` is
+ * completed by platform/win_events.c as a small carrier around Win32 mouse
+ * messages (see CGEventGetLocation etc. there). Declaring them here keeps
+ * src/event.c's mouse handlers source-identical across platforms. */
+CGPoint CGEventGetLocation(CGEventRef event);
+CGEventType CGEventGetType(CGEventRef event);
+long CGEventGetIntegerValueField(CGEventRef event, long field);
+CGEventFlags CGEventGetFlags(CGEventRef event);
+
+/* CoreGraphics geometry helpers used by src/event.c (mouse hit-testing).
+ * Windows mirrors the macOS semantics exactly (half-open contains check). */
+static inline CGRect CGRectInset(CGRect rect, CGFloat dx, CGFloat dy) {
+  rect.origin.x += dx;
+  rect.origin.y += dy;
+  rect.size.width -= 2 * dx;
+  rect.size.height -= 2 * dy;
+  return rect;
+}
+
+static inline bool CGRectContainsPoint(CGRect rect, CGPoint point) {
+  return point.x >= rect.origin.x
+      && point.x < rect.origin.x + rect.size.width
+      && point.y >= rect.origin.y
+      && point.y < rect.origin.y + rect.size.height;
+}
 
 // --- CG context shim (implemented in src/context.c, _WIN32 branch) ---------
 CGContextRef context_create(CGSize size, CGFloat scale);
