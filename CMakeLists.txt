@@ -344,3 +344,36 @@ else()
 endif()
 
 add_test(NAME ipc_pipe COMMAND ipc_pipe)
+
+# --- system-event routing test (S5, task 5.7) ----------------------------------
+# End-to-end suite over the real message pump: hidden window + Win32 router
+# (win_main.c, win_events.c), portable dispatch (event.c), animator timer
+# (animation.c), hotload watcher (hotload.c) and the mouse backend no-op
+# (mouse.c). The bar-manager surface is stubbed in tests/events_test.c; the
+# suite's own main drives cmocka, so SKBAR_NO_MAIN keeps win_main.c's S1
+# temporary main out of this link. Run with:
+#   ctest --test-dir build -R events
+add_executable(events
+    tests/events_test.c
+    src/event.c
+    src/animation.c
+    src/hotload.c
+    src/mouse.c
+    platform/win_main.c
+    platform/win_events.c)
+target_include_directories(events PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_definitions(events PRIVATE _WIN32 SKBAR_NO_MAIN)
+if(SKBAR_CMOCKA_SHIM)
+  target_compile_definitions(events PRIVATE SKBAR_CMOCKA_SHIM)
+  target_sources(events PRIVATE tests/cmocka_shim.c)
+else()
+  target_link_libraries(events PRIVATE ${SKBAR_CMOCKA_LIB})
+  if(DEFINED cmocka_SOURCE_DIR)
+    target_include_directories(events PRIVATE "${cmocka_SOURCE_DIR}/include")
+  endif()
+endif()
+
+add_test(NAME events COMMAND events)
