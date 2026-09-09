@@ -1,6 +1,29 @@
 #include "animation.h"
 #include "event.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#include "win_platform.h"
+
+// Windows (S5): the animator ticks through a 16 ms SetTimer on the hidden
+// event window; WM_TIMER routing in win_events.c consults this id and posts
+// ANIMATOR_REFRESH stamped with skbar_animator_timestamp() (QPC). The clock
+// animator->clock holds the QPC frequency, so animation_update()'s ratio math
+// is platform-identical.
+static uintptr_t g_animator_timer_id = 0;
+
+uintptr_t skbar_animator_timer_id(void) {
+  return g_animator_timer_id;
+}
+
+uint64_t skbar_animator_timestamp(void) {
+  LARGE_INTEGER counter;
+  QueryPerformanceCounter(&counter);
+  return (uint64_t)counter.QuadPart;
+}
+#endif
+
+#ifndef _WIN32
 static CVReturn animation_frame_callback(CVDisplayLinkRef display_link, const CVTimeStamp* now, const CVTimeStamp* output_time, CVOptionFlags flags, CVOptionFlags* flags_out, void* context) {
   uint64_t hostTime = output_time->hostTime;
   dispatch_async(dispatch_get_main_queue(), ^{
@@ -9,6 +32,7 @@ static CVReturn animation_frame_callback(CVDisplayLinkRef display_link, const CV
   });
   return kCVReturnSuccess;
 }
+#endif
 
 struct animation* animation_create() {
   struct animation* animation = malloc(sizeof(struct animation));
@@ -128,11 +152,30 @@ void animator_init(struct animator* animator) {
   animator->interp_function = 0;
   animator->duration = 0;
   animator->display_link = NULL;
+#ifdef _WIN32
+  animator->timer_id = 0;
+#endif
 
   animator_renew_display_link(animator);
 }
 
 void animator_renew_display_link(struct animator* animator) {
+#ifdef _WIN32
+  // Windows (S5): a 16 ms SetTimer replaces the CVDisplayLink. The timer id is
+  // derived from the animator pointer, so multiple animators coexist. The
+  // hidden event window must exist first (skbar_win_event_hwnd() != 0); before
+  // that we stay idle and animator_add() retries on the next add.
+  animator_destroy_display_link(animator);
+  LARGE_INTEGER frequency;
+  QueryPerformanceFrequency(&frequency);
+  animator->clock = (double)frequency.QuadPart;
+  uintptr_t hwnd = skbar_win_event_hwnd();
+  if (hwnd != 0) {
+    animator->timer_id = (uintptr_t)SetTimer((HWND)hwnd, (UINT_PTR)animator,
+                                             16, NULL);
+    g_animator_timer_id = animator->timer_id;
+  }
+#else
   animator_destroy_display_link(animator);
   CVDisplayLinkCreateWithActiveCGDisplays(&animator->display_link);
 
@@ -142,14 +185,26 @@ void animator_renew_display_link(struct animator* animator) {
 
   animator->clock = CVGetHostClockFrequency();
   CVDisplayLinkStart(animator->display_link);
+#endif
 }
 
 void animator_destroy_display_link(struct animator* animator) {
+#ifdef _WIN32
+  // KillTimer only while the hidden window still exists (teardown order: the
+  // pump destroys the window after the animator is stopped).
+  uintptr_t hwnd = skbar_win_event_hwnd();
+  if (hwnd != 0 && animator->timer_id) {
+    KillTimer((HWND)hwnd, (UINT_PTR)animator);
+  }
+  g_animator_timer_id = 0;
+  animator->timer_id = 0;
+#else
   if (animator->display_link) {
     CVDisplayLinkStop(animator->display_link);
     CVDisplayLinkRelease(animator->display_link);
     animator->display_link = NULL;
   }
+#endif
 }
 
 void animator_lock(struct animator* animator) {
@@ -186,7 +241,11 @@ void animator_add(struct animator* animator, struct animation* animation) {
                                         * ++animator->animation_count);
   animator->animations[animator->animation_count - 1] = animation;
 
+  #ifdef _WIN32
+  if (!animator->timer_id) animator_renew_display_link(animator);
+#else
   if (!animator->display_link) animator_renew_display_link(animator);
+#endif
 }
 
 static void animator_remove(struct animator* animator, struct animation* animation) {
@@ -285,10 +344,14 @@ bool animator_update(struct animator* animator, uint64_t time) {
 
 void animator_destroy(struct animator* animator) {
   if (animator->animation_count > 0) {
+#ifdef _WIN32
+    animator_destroy_display_link(animator);
+#else
     if (animator->display_link)
       CVDisplayLinkStop(animator->display_link);
     CVDisplayLinkRelease(animator->display_link);
     animator->display_link = NULL;
+#endif
 
     for (int i = 0; i < animator->animation_count; i++) {
       animation_destroy(animator->animations[i]);

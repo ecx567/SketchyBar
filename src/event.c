@@ -3,6 +3,14 @@
 #include "custom_events.h"
 #include "hotload.h"
 
+#ifdef _WIN32
+#include "win_platform.h"
+// Windows (S5): there is no mach_absolute_time / CLOCK_MONOTONIC_RAW_APPROX.
+// skbar_win_monotonic_ns() (GetTickCount64-based, 15.6 ms resolution) is
+// plenty for the SCROLL_TIMEOUT (150 ms) scroll-coalescing window below.
+#define clock_gettime_nsec_np(clock) skbar_win_monotonic_ns()
+#endif
+
 extern struct bar_manager g_bar_manager;
 extern int g_connection;
 extern int g_space_management_mode;
@@ -386,7 +394,23 @@ void event_execute(struct event* event) {
 void event_post(struct event* event) {
   if (event->type == EVENT_TYPE_UNKNOWN) return;
 
+#ifdef _WIN32
+  // Windows (S5): the main thread IS the message pump. Events produced on the
+  // pump thread (mouse/display/power router, animator timer) execute inline -
+  // the caller keeps ownership of `event` and its context until event_post
+  // returns. Events produced on worker threads (S5: the hotload watcher) are
+  // marshalled as a heap copy to the pump via skbar_win_post_event(); the pump
+  // executes and frees that copy, but the context pointer is never freed by
+  // the async path (S5 cross-thread producers pass NULL context - ownership
+  // handoff for richer payloads is S7).
+  if (skbar_win_is_main_thread()) {
+    event_execute(event);
+  } else {
+    skbar_win_post_event(event);
+  }
+#else
   if (pthread_main_np() == 0) {
     dispatch_sync(dispatch_get_main_queue(), ^{ event_execute(event); });
   } else event_execute(event); 
+#endif
 }

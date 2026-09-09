@@ -109,6 +109,11 @@ void animation_setup(struct animation* animation, void* target, animator_functio
 
 struct animator {
   CVDisplayLinkRef display_link;
+#ifdef _WIN32
+  // Windows (S5): the 60 Hz beat is a 16 ms SetTimer on the hidden event
+  // window (see win_platform.h's animator contract). 0 while idle.
+  uintptr_t timer_id;
+#endif
 
   double clock;
   uint32_t interp_function;
