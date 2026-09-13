@@ -423,3 +423,107 @@ yaml envelope, spec-scenario compliance matrix over all requirements in
 `specs/windows-port/spec.md`) is NOT produced here — it stays pending until S5-S7
 implement and verify (5.1-5.7, 6.1-6.7, 7.1-7.10). Archive of this change must wait
 for that report.
+# S5 verification
+
+Change: `windows-port` · Slice: S5 (tasks 5.1-5.7) · Branch: `feat/windows-port-s5`
+Verified: 2026-09-08, HEAD = `9ad776e` (on top of `49ace11`; 5 work-unit commits)
+Scope: **SLICE-SCOPED** — S5 evidence only. Whole-change `verify-report` stays pending
+until S6-S7 complete (26/50 tasks).
+
+## Design deviations (documented, all `#ifdef _WIN32`-scoped)
+
+1. **Hidden TOP-LEVEL window, not a message-only window**: `WM_DISPLAYCHANGE` and
+   `WM_POWERBROADCAST` are delivered only to top-level windows owned by the thread;
+   a message-only window never receives them. `win_main.c` creates a zero-sized
+   hidden top-level window (`sketchybar_event`) on its own pump thread.
+2. **`regex.h` shim**: `platform/win_regex.h` (declarations only; regcomp/regexec/
+   regfree/regerror, `REG_EXTENDED`/`REG_NOMATCH`) replaces `<regex.h>` under
+   `#ifdef _WIN32` in `src/message.h`. macOS keeps `<regex.h>`.
+3. **`mach_port_t` = `HANDLE`**: `win_graphics_types.h` (includes `<windows.h>`,
+   reached before `mach.h` in the event.h chain) typedefs `mach_port_t` as `HANDLE`
+   — must stay in lockstep with `src/mach.h`.
+4. **off-main-thread marshalling**: `event_post` keeps the shared
+   `EVENT_TYPE_UNKNOWN` guard, then `#ifdef _WIN32` routes main→`event_execute`
+   inline, off-main→`skbar_win_post_event` (heap copy + `PostMessage(WM_APP_EVENT)`;
+   pump executes the copy inline and frees it; the context pointer is never freed by
+   the async path — cross-thread producers pass NULL, ownership handoff is S7).
+5. **Enter/exit hover events route DIRECTLY** (`bar_manager_handle_mouse_entered/
+   exited`), not through `event_post`: `bar_manager.h`'s `get_item_by_wid` takes
+   `uint32_t` while `event.c` passes the int64 CGEvent field, so item identity
+   cannot survive a queue round-trip until real display windows exist (S6). Click
+   and scroll DO cross the queue (they resolve by point, which is lossless).
+6. **No TrackMouseEvent in S5**: the hidden conduit window is zero-sized, so
+   `TME_LEAVE` would fire immediately and spurious-exit the hover chain. `WM_MOUSELEAVE`
+   is still handled; real bar windows arm TME themselves in S7.
+7. **`hotload.h` declares `void begin_receiving_config_change_events()`** while the
+   portable `hotload.c` defines it `int` (hotload.c never includes hotload.h — a
+   pre-existing macOS inconsistency). The Windows watcher thread follows the source
+   definition; callers treat it as void.
+8. **Non-destructive `win_dirname`**: macOS `dirname()` mutates `g_config_file` in
+   place (twice per exec — walking up a level); the Windows branch resolves the
+   directory ONCE into a local so `g_config_file` stays the file path across fires.
+9. **`sketchybar` exe is NOT yet linkable on Windows**: `PORTABLE_CORE` is empty by
+   design — `bar_manager.c` and the rest of the portable core compile for macOS only
+   until S6. `win_main.c`/`win_events.c` now reference that real surface (correctly),
+   so the full-exe link gate is deliberately deferred to S6+; the S5 gates are the
+   `events` ctest target, the compile-check seam, and the makefile parity diff.
+
+## Per-task result
+
+| Task | Acceptance | Result | Evidence |
+|---|---|---|---|
+| 5.1 Type seams | CGEvent mirror accessors + `mach_port_t`/regex/display flags on Windows | **PASS** | `win_graphics_types.h` (kCGEventNull=0, windowNumber `0x33`, buttonNumber `3`, deltaAxis1 `11`, CGRectInset/CGRectContainsPoint inline, `CGDisplayChangeSummaryFlags`=uint32_t, `mach_port_t`=HANDLE); `win_regex.h`; `message.h` guarded include; `helpers.h` `get_wid_from_cg_event` `#else` branch |
+| 5.2 Pump thread + hidden window | dedicated thread, hidden HWND, `skbar_win_event_hwnd`, dispatch router | **PASS** | `win_main.c`: CoInitializeEx → RegisterClassExW (tolerates `ERROR_CLASS_ALREADY_EXISTS` — class outlives individual windows) → CreateWindowExW(0,0,0,0) → publish hwnd via `InterlockedExchangePointer` → `skbar_win_events_init` → `GetMessageW`/`DispatchMessageW` loop; WndProc `WM_CLOSE`→`PostQuitMessage`, else router → `DefWindowProcW`; `skbar_win_is_main_thread` = `GetCurrentThreadId`==pump id; `main()` under `#ifndef SKBAR_NO_MAIN` (S1 temp entry, removed at 7.5) |
+| 5.3 `win_platform.h` contract | thread/id/event/timer accessors declared, windows.h-free | **PASS** | `win_platform.h`: `skbar_win_is_main_thread`, `_post_event`, `_event_hwnd`, `_handle_message(uintptr_t×4)`, `_monotonic_ns` (GetTickCount64, covers `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW_APPROX)` in scroll coalescing), `_animator_timer_id`, `_animator_timestamp` (QPC); fwd-declares `struct event`; no `<windows.h>` |
+| 5.4 Portable event dispatch | `event_post` Windows branch, table untouched | **PASS** | `event.c`: include seam + `clock_gettime_nsec_np→skbar_win_monotonic_ns` macro after hotload.h; shared UNKNOWN guard; `#ifdef _WIN32` main/off-main split; macOS body byte-identical; `event_handler[]` untouched |
+| 5.5 Animator timer | SetTimer-based 60 Hz beat + QPC clock | **PASS** | `animation.c`: `g_animator_timer_id` + `skbar_animator_timer_id/timestamp`; `animator_init` zeroes `timer_id`; renew → `SetTimer((HWND)hwnd,(UINT_PTR)animator,16,NULL)`; destroy → guarded `KillTimer`; `animator_add` Windows check `!timer_id`; `animation.c:249` frame callback `#ifndef _WIN32`; `animation.h` `uintptr_t timer_id` member |
+| 5.6 Mouse/hotload backends | Windows no-op / ReadDirectoryChangesW watcher | **PASS** | `mouse.c` `mouse_begin` no-op (Carbon body under `#else`); `hotload.c` `config_watch_thread` (RDCW + `WaitForMultipleObjects` on `overlapped.hEvent` + stop event, 64 KB buffer, 500 ms `HOTLOAD_DEBOUNCE_MS` gate, posts via `event_post` → marshalled), `hotload_stop_watching` (SetEvent + join 2000 ms), `set_config_file_path` → `_fullpath`, exec → win_setenv+`_chdir`+`fork_exec` (S1 shim, real runner = 7.6) |
+| 5.7 Events cmocka suite | 5 tests: marshal, mouse routing, animator, hotload+debounce, display/power | **PASS** | `tests/events_test.c` (stub bar_manager surface pinned to `bar_manager.h` signatures; counters for every sink); `CMakeLists.txt` `events` target + `add_test(NAME events ...)` |
+
+## Test determinism proof
+
+- `ctest --test-dir build/s4 -R events --output-on-failure` → **`100% tests passed`** (5/5 cmocka tests).
+- Direct binary: **8/8 consecutive `build/s4/events.exe` runs pass** (exit 0; the two
+  `failed to execute file ...` lines per run are the expected S1 `fork_exec` shim noise).
+- Regression: `ctest -R ipc_pipe` → **Passed** (S4 suite stays green; 100%).
+- Full-suite note: ctest registers 8 tests; 6 (bitmap_diff, compositor_spike, …) are
+  unbuilt analysis/spike executables that predate S5 (`***Not Run`/missing exe) —
+  not S5 regressions.
+- Build: `cmake --build build/s4 --target events` → exit 0 (20 warnings: pre-existing
+  sign-compare / max-min macro redefinition / CRT deprecations); `--target
+  platform_compile_check` → exit 0.
+- The hotload test is deterministic because the first change is driven by a retry loop
+  until the watcher observes one (RDCW never replays notifications that happen before
+  the first read is armed); exactly one destroy/init/begin cycle is counted because the
+  debounce suppresses the trailing touches.
+
+## macOS isolation proof
+
+- `git diff --exit-code 47585f9..HEAD -- makefile` → exit 0 (**empty**; macOS build untouched).
+- All macOS bodies preserved under `#ifdef _WIN32`/`#else`/`#ifndef _WIN32` (`event.c`
+  event_post macOS branch byte-identical; `animation.c:249` callback; `mouse.c` Carbon
+  body; `hotload.c` FSEvents/exec bodies). Shared `event_handler[]` table untouched.
+
+## Residual gaps (honest)
+
+1. **`fork_exec` config runner is the S1 shim**: it prints `failed to execute file` and
+   returns; the real CreateProcess-based runner is task 7.6. The hotload exec path is
+   exercised structurally (win_setenv + `_chdir` + shim call), not end-to-end.
+2. **`mach.c` (S4) does not post through `event_post`**: `server->handler` runs
+   synchronously on the pipe server thread with `{buffer, MACH_MESSAGE}` semantics, so
+   cross-thread context ownership (who frees the buffer, how it reaches the dispatch
+   table) is an S7 wiring concern — documented, not yet implemented.
+3. **`compile_commands.json` symlink noise**: cmocka's configure step tries to symlink
+   the file into `_deps/` and fails (`El cliente no dispone de un privilegio requerido`)
+   on this machine (no symlink privilege). Non-fatal; builds and tests proceed.
+4. **Enter/exit rely on the router's pointer identity**: hover bookkeeping
+   (`g_hover_item`) is authoritative only while items are process-static; when real
+   display windows arrive (S6) the router must switch to window-id resolution inside
+   `bar_manager_get_item_by_wid`'s 32-bit contract.
+5. **CI verdict pending**: no push yet (offline dev machine; CI unknown until next push).
+
+## Slice-scope note
+
+S5-only evidence. Whole-change `verify-report` remains pending until S6-S7
+(6.1-6.7, 7.1-7.10). Archive must wait for that report.
+
