@@ -20,3 +20,5 @@ build*/
 # re-downloaded from the pinned checksummed source.
 third_party/skia/*
 !third_party/skia/README.md
+# Local Pi runtime state
+.atl/
