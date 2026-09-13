@@ -191,8 +191,16 @@ void ipc_pipe_name(const char* bs_name, char* out, size_t out_len) {
 }
 
 /* --- client transport --------------------------------------------------------- */
+/* Connect attempts: each iteration gives the server thread real time to reach
+ * a listening state. A single-instance pipe cycles through FILE_NOT_FOUND
+ * (recreate window) and ERROR_PIPE_BUSY (servicing/not-yet-listening), so the
+ * client must retry both with a real wait instead of bailing on the first
+ * transient error. Worst case ≈ 30 * (WaitNamedPipe 100ms | Sleep 10ms). */
+#define IPC_CONNECT_ATTEMPTS 30
+#define IPC_CONNECT_RETRY_SLEEP_MS 10
+
 static HANDLE ipc_open_client_pipe(const char* name) {
-  for (int attempt = 0; attempt < 3; attempt++) {
+  for (int attempt = 0; attempt < IPC_CONNECT_ATTEMPTS; attempt++) {
     HANDLE pipe = CreateFileA(name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                               OPEN_EXISTING, 0, NULL);
     if (pipe != INVALID_HANDLE_VALUE) return pipe;
@@ -200,14 +208,19 @@ static HANDLE ipc_open_client_pipe(const char* name) {
     DWORD error = GetLastError();
     ipc_trace("open attempt %d: err=%lu\n", attempt, error);
     if (error != ERROR_PIPE_BUSY && error != ERROR_FILE_NOT_FOUND) return NULL;
-    /* The server thread may not have created its instance yet (startup race)
-     * or is servicing the previous client; wait up to the IPC timeout. */
-    BOOL waited = WaitNamedPipeA(name, IPC_TIMEOUT_MS);
-    ipc_trace("  WaitNamedPipeA: %d err=%lu\n", waited, GetLastError());
-    if (!waited) {
-      if (GetLastError() == ERROR_FILE_NOT_FOUND && attempt < 2) continue;
-      return NULL;
+
+    if (error == ERROR_PIPE_BUSY) {
+      /* The instance exists but is busy (a client is being serviced or the
+       * server has not reached ConnectNamedPipe yet). Wait a bounded real
+       * time for it to become available; if that times out the server is in
+       * the single-instance recreate window, so fall through to the sleep. */
+      if (WaitNamedPipeA(name, IPC_TIMEOUT_MS)) continue;  /* retry open now */
     }
+    /* ERROR_FILE_NOT_FOUND (instance not created yet) or a timed-out busy
+     * wait: give the server thread real time to create/recreate its instance
+     * before retrying. WaitNamedPipeA alone cannot cover these windows
+     * because it returns immediately for a nonexistent pipe. */
+    Sleep(IPC_CONNECT_RETRY_SLEEP_MS);
   }
   return NULL;
 }
@@ -282,6 +295,8 @@ static DWORD WINAPI ipc_server_thread(LPVOID context) {
   struct mach_server* server = context;
 
   for (;;) {
+    if (!server->is_running) break;  /* clean stop requested */
+
     HANDLE pipe = CreateNamedPipeA(server->pipe_name,
                                    PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE
@@ -297,11 +312,17 @@ static DWORD WINAPI ipc_server_thread(LPVOID context) {
     }
     ipc_trace("server: instance created\n");
 
+    if (!server->is_running) {  /* stop arrived between create and connect */
+      CloseHandle(pipe);
+      break;
+    }
+
     BOOL connected = ConnectNamedPipe(pipe, NULL);
     if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
       ipc_trace("server: connect failed err=%lu\n", GetLastError());
-      Sleep(50);
       CloseHandle(pipe);
+      if (!server->is_running) break;  /* cancelled by stop: exit now */
+      Sleep(50);
       continue;
     }
     ipc_trace("server: client connected\n");
@@ -324,6 +345,7 @@ static DWORD WINAPI ipc_server_thread(LPVOID context) {
       free(frame);
     }
     CloseHandle(pipe);  /* single instance: recreated on the next iteration */
+    if (!server->is_running) break;  /* stop requested while servicing */
   }
   return 0;
 }
@@ -348,6 +370,34 @@ bool mach_server_begin(struct mach_server* mach_server, mach_handler handler) {
     return false;
   }
   return true;
+}
+
+void mach_server_stop(struct mach_server* mach_server) {
+  if (!mach_server || !mach_server->is_running) return;
+
+  mach_server->is_running = false;
+
+  /* The thread may be blocked in a synchronous ConnectNamedPipe. Request
+   * cancellation, then wait briefly; if it re-blocked before observing
+   * is_running, cancel again until it exits (bounded total wait). */
+  for (int attempt = 0; attempt < 40 && mach_server->thread; attempt++) {
+    if (WaitForSingleObject(mach_server->thread, 25) == WAIT_OBJECT_0) break;
+    DWORD tid = GetThreadId(mach_server->thread);
+    if (tid) CancelSynchronousIo(mach_server->thread);
+  }
+
+  if (mach_server->thread) {
+    CloseHandle(mach_server->thread);
+    mach_server->thread = NULL;
+  }
+  if (mach_server->pipe) {
+    CloseHandle(mach_server->pipe);
+    mach_server->pipe = NULL;
+  }
+  if (mach_server->sd) {
+    free(mach_server->sd);
+    mach_server->sd = NULL;
+  }
 }
 
 char* mach_send_message(mach_port_t port, char* message, uint32_t len,
