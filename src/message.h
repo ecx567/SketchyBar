@@ -1,6 +1,10 @@
 #pragma once
 
+#ifdef _WIN32
+#include "../platform/win_regex.h"
+#else
 #include <regex.h>
+#endif
 #include "alias.h"
 #include "background.h"
 #include "bar_item.h"
