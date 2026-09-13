@@ -275,3 +275,72 @@ if(SKIA_INCLUDE_DIR)
 endif()
 
 add_test(NAME compositor_spike COMMAND compositor_spike)
+
+# --- IPC seam check (S4) ---------------------------------------------------------
+# Compiles src/mach.c against the Windows named-pipe implementation (tasks
+# 4.1-4.3). STATIC library: undefined refs to macOS-only symbols (mach_msg_*,
+# CFMachPort, g_mach_server) are tolerated until their Windows adapters land,
+# mirroring graphics_seam_check / compositor_seam_check. Build it with:
+#   cmake --build . --target ipc_seam_check
+add_library(ipc_seam_check STATIC src/mach.c)
+target_include_directories(ipc_seam_check PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform)
+target_compile_definitions(ipc_seam_check PRIVATE _WIN32)
+
+# --- cmocka resolution (task 4.5) ------------------------------------------------
+# Prefer a system install, then a pinned download (CI has network; the SHA256
+# is the canonical cmocka-1.1.7 release tarball). Offline machines degrade to
+# the bundled API-compatible shim (tests/cmocka_shim.h) so the suite still
+# builds and runs unchanged.
+find_package(cmocka QUIET)
+if(cmocka_FOUND)
+  set(SKBAR_CMOCKA_LIB cmocka)
+  set(SKBAR_CMOCKA_SHIM OFF)
+else()
+  set(SKBAR_CMOCKA_URL "https://cmocka.org/files/1.1/cmocka-1.1.7.tar.xz")
+  set(SKBAR_CMOCKA_SHA256 "810570eb0b8d64804331f82b29ff47c790ce9cd6b163e98d47a4807047ecad82")
+  # Probe before FetchContent: its internal download hard-fails instead of
+  # letting us degrade to the shim.
+  file(DOWNLOAD "${SKBAR_CMOCKA_URL}" "${CMAKE_CURRENT_BINARY_DIR}/cmocka_probe.tar.xz"
+       EXPECTED_HASH SHA256=${SKBAR_CMOCKA_SHA256} STATUS SKBAR_CMOCKA_DL)
+  list(GET SKBAR_CMOCKA_DL 0 SKBAR_CMOCKA_DL_CODE)
+  if(SKBAR_CMOCKA_DL_CODE EQUAL 0)
+    file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/cmocka_probe.tar.xz")
+    include(FetchContent)
+    FetchContent_Declare(cmocka URL "${SKBAR_CMOCKA_URL}"
+                                URL_HASH SHA256=${SKBAR_CMOCKA_SHA256})
+    # Keep the fetched cmocka static: this tree builds no shared targets
+    # (cmocka's `cmocka-static` variant is internal to ITS unit tests).
+    set(BUILD_SHARED_LIBS OFF)
+    FetchContent_MakeAvailable(cmocka)
+    set(SKBAR_CMOCKA_LIB cmocka)
+    set(SKBAR_CMOCKA_SHIM OFF)
+  else()
+    message(STATUS "cmocka unavailable (no network): using tests/cmocka_shim.h fallback")
+    set(SKBAR_CMOCKA_SHIM ON)
+  endif()
+endif()
+
+# --- named-pipe IPC test (S4, task 4.5) --------------------------------------------
+# End-to-end suite over real named pipes; registered with ctest so it runs via:
+#   ctest --test-dir build -R ipc_pipe
+add_executable(ipc_pipe tests/ipc_pipe_test.c src/mach.c)
+target_include_directories(ipc_pipe PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_definitions(ipc_pipe PRIVATE _WIN32)
+if(SKBAR_CMOCKA_SHIM)
+  target_compile_definitions(ipc_pipe PRIVATE SKBAR_CMOCKA_SHIM)
+  target_sources(ipc_pipe PRIVATE tests/cmocka_shim.c)
+else()
+  target_link_libraries(ipc_pipe PRIVATE ${SKBAR_CMOCKA_LIB})
+  # cmocka 1.1.7's CMakeLists uses include_directories() (no per-target
+  # propagation), so consumers must add the fetched include dir themselves.
+  if(DEFINED cmocka_SOURCE_DIR)
+    target_include_directories(ipc_pipe PRIVATE "${cmocka_SOURCE_DIR}/include")
+  endif()
+endif()
+
+add_test(NAME ipc_pipe COMMAND ipc_pipe)
